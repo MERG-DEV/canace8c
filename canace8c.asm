@@ -1,5 +1,5 @@
 ;     TITLE   "Source for ACE8C node for CBUS"
-; filename ACE8C_w.asm
+; filename ACE8C_x.asm
 ; Uses 4 MHz resonator and PLL for 16 MHz clock
 ; This is an 8 input FLiM producer node with readout.
 ; Has 8 switch / logic inputs with 100K pullups.
@@ -136,6 +136,8 @@
 ;Rev v  Corrected bug so now responds to a RTR in SLiM mode.
 ;Rev w  Now produces short events on a SOD if the inputs have a 'device number'.
 ;   same short events with a short poll (0x9A) to a device no.
+;Rev x  Polling inputs (short mode) gives a response of 0x9D for ON and 0x9E for OFF (27/07/11)
+;   Added WRACK to all EEPROM write sequences. Added error responses. (28/07/11)
 
 ;end of comments for ACE8C
 
@@ -233,7 +235,7 @@ ACE8C_ID  equ 5
 
 Modstat equ 1   ;address in EEPROM
 Man_no  equ .165  ;manufacturer number
-Ver_no  equ "W"   ;for now
+Ver_no  equ "X"   ;for now
 Para1 equ ACE8C_ID  ; module identifier
 Para2 equ .32
 Para3 equ 2
@@ -1646,6 +1648,8 @@ go_on_s btfss PORTA,LEARN
 
 chklrn  btfsc Datmode,4
     bra   learn1      ;is in learn mode
+;   movlw 2       ;errror not in learn mode
+;   call  errsub
     bra   main2 
 
 readENi call  thisNN      ;read event by index
@@ -1654,9 +1658,12 @@ readENi call  thisNN      ;read event by index
     call  enrdi
     bra   main2
 
-params  btfss Datmode,2   ;only in setup mode
+params  btfsc Datmode,2   ;only in setup mode
+    bra   para1b
+;   movlw 3
+;   call  errsub
     bra   main2
-    call  parasend
+para1b  call  parasend
     bra   main2
     
 setNV call  thisNN
@@ -1727,6 +1734,8 @@ learn3  btfsc Datmode,6   ;read EV?
 learn4  call  learnin     ;put EN into stack and RAM
     sublw 0
     bz    new_EV
+    movlw 4
+    call  errsub
     bra   l_out1      ;too many
 isthere btfsc Mode,1
     bra   isth1
@@ -1808,6 +1817,7 @@ mod_EVf movff Rx0d5,EVtemp  ;store EV index
     bra   rdbak
     movf  EVtemp2,W
     call  eewrite       ;put in
+    call  wrack       ;write acknowledge
     bra   l_out2
 
 
@@ -1824,6 +1834,8 @@ l_out2  bcf   Datmode,0
     
 noEV  clrf  Tx1d5     ;invalid EV index
     clrf  Tx1d6
+    movlw 6
+    call  errsub
     bra   shift4      ;send with blank EV data
 
 
@@ -1892,7 +1904,7 @@ un2   bsf   EECON1,RD
     bcf   PIR2,TMR3IF
     bcf   PORTB,7
 un3   bcf   Datmode,5
-    
+    call  wrack
     bra   l_out
         
 
@@ -2228,7 +2240,8 @@ nnrel movwf Tx1d0
     call  sendTX
     return
 
-
+wrack movlw 0x59
+    bra   nnrel
 
     
 ;*****************************************************************************
@@ -2585,7 +2598,6 @@ s_seq4  incf  Incount   ;for next input
     
     call  sendTX
     call  dely
-    clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
     btfsc PORTC,1
@@ -2600,7 +2612,6 @@ s_seq4  incf  Incount   ;for next input
 s_seq5  incf  Incount   ;for next input
     call  sendTX
     call  dely
-    clrf  Tx1d3
     movff Cmdtemp,Tx1d0
     
     btfsc PORTC,2
@@ -2614,7 +2625,6 @@ s_seq5  incf  Incount   ;for next input
 s_seq6  incf  Incount   ;for next input
     call  sendTX
     call  dely
-    clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
     btfsc PORTC,3
@@ -2628,7 +2638,6 @@ s_seq6  incf  Incount   ;for next input
 s_seq7  incf  Incount   ;for next input
     call  sendTX
     call  dely
-    clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
     btfsc PORTC,4
@@ -2642,7 +2651,6 @@ s_seq7  incf  Incount   ;for next input
 s_seq8  incf  Incount   ;for next input
     call  sendTX
     call  dely
-    clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
     btfsc PORTC,5
@@ -2656,7 +2664,6 @@ s_seq8  incf  Incount   ;for next input
 s_seq9  incf  Incount   ;for next input
     call  sendTX
     call  dely
-    clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
     btfsc PORTC,6
@@ -2670,7 +2677,6 @@ s_seq9  incf  Incount   ;for next input
 s_seq10 incf  Incount   ;for next input
     call  sendTX
     call  dely
-    clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
     btfsc PORTC,7
@@ -2734,10 +2740,10 @@ ss_in1  movf  EVtemp,F
 get_in  movf  In_roll,W
     andwf PORTC,W
     bz    ss_low
-    movlw 0x99
-    movwf Tx1d0   ;an off state
+    movlw 0x9E
+    movwf Tx1d0   ;an off state response
     bra   ss_in2
-ss_low  movlw 0x98
+ss_low  movlw 0x9D    ;an on state response
     movwf Tx1d0
 ss_in2  movff Rx0d3,Tx1d3 ;put device no in Tx buffer
     movff Rx0d4,Tx1d4
@@ -2765,7 +2771,7 @@ sendTXa movf  Dlc,W       ;get data length
 
 putNV movlw NV_NUM + 1    ;put new NV in EEPROM and the NV ram.
     cpfslt  Rx0d3
-    return
+    bra   no_NV
     movf  Rx0d3,W
     bz    no_NV
     decf  WREG      ;NVI starts at 1
@@ -2774,8 +2780,11 @@ putNV movlw NV_NUM + 1    ;put new NV in EEPROM and the NV ram.
     movf  Rx0d4,W
     movwf NV_temp
     call  eewrite 
-
-no_NV return
+    call  wrack
+    return
+no_NV movlw .10       ;error invalid NV index
+    call  errsub
+    return
 
 ;************************************************************************
 
@@ -2799,9 +2808,9 @@ getNV2  movff Rx0d1,Tx1d1
     call  sendTXa
     return
 
-no_NV1  clrf  Tx1d3     ;if not valid NV
-    clrf  Tx1d4
-    bra   getNV2
+no_NV1  movlw .10     ;if not valid NV
+    call  errsub
+    return
 ;**************************************************************************
 
 ;   check if command is for this node
@@ -2848,6 +2857,8 @@ enloop  movlw 0
     incf  EEADR
     decfsz  Count
     bra   enloop
+    btfsc Mode,1
+    call  wrack
     return
 
 ;***********************************************************************
