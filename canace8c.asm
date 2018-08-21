@@ -1,5 +1,5 @@
 ;     TITLE   "Source for ACE8C node for CBUS"
-; filename ACE8C_s.asm
+; filename ACE8C_w.asm
 ; Uses 4 MHz resonator and PLL for 16 MHz clock
 ; This is an 8 input FLiM producer node with readout.
 ; Has 8 switch / logic inputs with 100K pullups.
@@ -117,8 +117,8 @@
 ;Block to non supported Events in SLiM
 ;Mods to RTR and Unlearn  rev j
 ;Roger's mods to TXB2CON  rev k
-;Added facility to trigger mode 1 events using the PB in SLiM mode. 
-;Rev m  (no rev l)02/03/10   Prevent eror messages in unset. Rev n. (17/03/10)
+;Added facility to trigger mode 1 events using the PB in SLiM mode. Rev m  (no rev l)02/03/10
+;Prevent eror messages in unset. Rev n. (17/03/10)
 ;Rev p. new enum scheme  24/03/10  (no rev o)
 ;Rev q. Added clear of RXB overflow flags in COMSTAT
 ;Rev r. Added response to short events and also mode for individual event polling. 04/12/10
@@ -130,6 +130,12 @@
 ;Fix in 'route' routine for short mode events
 ;Changes to state sequence and route routines for short event requests and responses 12/12/10
 ;Rev s  Added short event output events if there is an allocated 'device number'. (Modes 8 to 15 set)19/01/11.
+;Rev t  07/03/11 Only allow Boot with NN of zero. 
+;   Allow read params by index in slim mode with NN of zero
+;Rev u  Revert to allowing Boot and Read Params in SLiM mode with nodes NN
+;Rev v  Corrected bug so now responds to a RTR in SLiM mode.
+;Rev w  Now produces short events on a SOD if the inputs have a 'device number'.
+;   same short events with a short poll (0x9A) to a device no.
 
 ;end of comments for ACE8C
 
@@ -227,7 +233,7 @@ ACE8C_ID  equ 5
 
 Modstat equ 1   ;address in EEPROM
 Man_no  equ .165  ;manufacturer number
-Ver_no  equ "S"   ;for now
+Ver_no  equ "W"   ;for now
 Para1 equ ACE8C_ID  ; module identifier
 Para2 equ .32
 Para3 equ 2
@@ -1190,9 +1196,9 @@ back1 clrf  PIR3      ;clear all flags
     retfie  1       ;use shadow registers
     
 isRTR btfsc Datmode,1   ;setup mode?
-    bra   back      ;back
-    btfss Mode,1      ;FLiM?
-    bra   back
+    bra   back      ;back    
+;   btfss Mode,1      ;FLiM?    corrected in rev v
+;   bra   back
     movlb .15
 isRTR1  btfsc TXB2CON,TXREQ ;wait till sent
     bra   isRTR1    
@@ -1461,10 +1467,10 @@ readEV  btfss Datmode,4
 
 evns1 call  thisNN        ;read event numbers
     sublw 0
-    bnz   evns3
+    bnz   notNNx
     call  evns2
     bra   main2
-evns3 goto  notNN
+;evns3  goto  notNN
 
 sendNN  btfss Datmode,2   ;in NN set mode?
     bra   main2     ;no
@@ -1477,9 +1483,17 @@ sendNN  btfss Datmode,2   ;in NN set mode?
 
 reval call  thisNN        ;read event numbers
     sublw 0
-    bnz   notNN
+    bnz   notNNx
     call  evsend
     bra   main2
+    
+short clrf  Rx0d1
+    clrf  Rx0d2
+    bra   go_on
+
+notNNx  goto  notNN
+
+paramsx goto  params
 
 ;************************************************************
 
@@ -1491,17 +1505,20 @@ packet  movlw CMD_ON  ;only ON and REQ events supported
     
     movlw CMD_REQ
     subwf Rx0d0,W
-    bz    go_on
+    bz    go_on_x
     movlw SCMD_ON
     subwf Rx0d0,W
-    bz  short
+    bz    short
   
     movlw SCMD_REQ
     subwf Rx0d0,W
-    bz  short
+    bz    short
     movlw 0x5C      ;reboot
     subwf Rx0d0,W
     bz    reboot
+    movlw 0x73
+    subwf Rx0d0,W
+    bz    para1a      ;read individual parameters
     btfss Mode,1      ;FLiM?
     bra   main2
     movlw 0x42      ;set NN on 0x42
@@ -1509,8 +1526,7 @@ packet  movlw CMD_ON  ;only ON and REQ events supported
     bz    setNN
     movlw 0x10      ;read manufacturer
     subwf Rx0d0,W
-    bz    params      ;read node parameters
-    
+    bz    paramsx     ;read node parameters 
     movlw 0x53      ;set to learn mode on 0x53
     subwf Rx0d0,W
     bz    setlrn    
@@ -1545,9 +1561,6 @@ packet  movlw CMD_ON  ;only ON and REQ events supported
     movlw 0x72
     subwf Rx0d0,W
     bz    readENi     ;read event by index
-    movlw 0x73
-    subwf Rx0d0,W
-    bz    para1a      ;read individual parameters
     movlw 0x58
     subwf Rx0d0,W
     bz    evns
@@ -1557,8 +1570,7 @@ packet  movlw CMD_ON  ;only ON and REQ events supported
     bra   main2
 evns  goto  evns1
 
-reboot  btfss Mode,1      ;FLiM?
-    bra   reboot1
+reboot
     call  thisNN
     sublw 0
     bnz   notNN
@@ -1567,9 +1579,16 @@ reboot1 movlw 0xFF
     movlw 0xFF
     call  eewrite     ;set last EEPROM byte to 0xFF
     reset         ;software reset to bootloader
-      
+        
 main2 bcf   Datmode,0
     goto  main      ;loop
+    
+para1a  
+    call  thisNN      ;read parameter by index
+    sublw 0
+    bnz   notNN
+    call  para1rd
+    bra   main2
     
 setNN btfss Datmode,2   ;in NN set mode?
     bra   main2     ;no
@@ -1584,8 +1603,6 @@ setNN btfss Datmode,2   ;in NN set mode?
     bsf   PORTB,6     ;LED ON
     bra   main2
     
-
-
 rden  goto  rden1
     
 setlrn  call  thisNN
@@ -1611,15 +1628,9 @@ notNN bra   main2
 
 clrerr  movlw 2     ;not in learn mode
     goto  errmsg
-
-short clrf  Rx0d1
-    clrf  Rx0d2
-    bra   go_on
-
-
-    
+  
 go_on btfss Mode,1      ;FLiM?
-    bra   go_on_s
+    bra   go_on_s     ; j if SLiM
   
 go_on2  ;movlw  0x90      ;is it an ON or request event?
     ;subwf  Rx0d0,W     ;only here if it is.
@@ -1628,6 +1639,7 @@ go_on1  call  enmatch
     sublw 0
     bz    do_it
     bra   main2     ;not here
+    
 go_on_s btfss PORTA,LEARN
     bra   learn1      ;is in learn mode
     bra   go_on1
@@ -1659,17 +1671,6 @@ readNV  call  thisNN
     call  getNV
     bra   main2
 
-
-    
-
-
-
-para1a  call  thisNN      ;read parameter by index
-    sublw 0
-    bnz   notNN
-    call  para1rd
-    bra   main2
-
 readEN  call  thisNN
     sublw 0
     bnz   notNN
@@ -1678,10 +1679,6 @@ readEN  call  thisNN
 do_it 
     call  ev_set      ;do it
     bra   main2
-    
-
-    
-
     
 rden1 call  thisNN
     sublw 0
@@ -2546,12 +2543,16 @@ ev_set  movlw 0     ;what is EV?
     bz    state_seq ;send state sequence if EV = 0
     movlw 1
     subwf EVtemp,W
-    bz    route   ;send event to set route
+    bz    route_x   ;send event to set route
     btfss EVtemp,3  ;is it a single input state request?
     return        ;no more yet
     bra   ss_in
+
+route_x   goto  route ;branch was too long
+
 state_seq
     call  dely
+    clrf  Incount   ;for switch number
     movlw 5
     movwf Dlc
     movf  Rx0d0,W
@@ -2562,6 +2563,9 @@ state_seq
     movlw SCMD_REQ    ;is it a short request
     subwf Cmdtemp,W
     bnz   s_seq3      ;not a request
+    movlw 0x90
+    movwf Cmdtemp
+    bra   s_seq2
 s_seq1  movlw 0x93      ;ON response OPC
     movwf Cmdtemp
     bra   s_seq2
@@ -2569,65 +2573,115 @@ s_seq3  movlw 0x90      ;ON command OPC
     movwf Cmdtemp
 s_seq2  movff Cmdtemp,Tx1d0 ;put in command byte
     clrf  Tx1d3
-    clrf  Tx1d4
+    movff Incount,Tx1d4
     incf  Tx1d4   ;start at 1
     btfsc PORTC,0   ;test input state
     incf  Tx1d0,F     ;off
-  
+    call  ev_match
+    movwf,W
+    bnz   s_seq4    ;not a device numbered switch
+    call  dn_sod    ;do a device numbered response
+s_seq4  incf  Incount   ;for next input
     
     call  sendTX
     call  dely
+    clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
     btfsc PORTC,1
     incf  Tx1d0,F     ;off
     
+    movff Incount,Tx1d4
     incf  Tx1d4
-    
+    call  ev_match
+    movwf,W
+    bnz   s_seq5    ;not a device numbered switch
+    call  dn_sod    ;do a device numbered response
+s_seq5  incf  Incount   ;for next input
     call  sendTX
     call  dely
+    clrf  Tx1d3
     movff Cmdtemp,Tx1d0
     
     btfsc PORTC,2
     incf  Tx1d0,F     ;off
+    movff Incount,Tx1d4
     incf  Tx1d4
-    
+    call  ev_match
+    movwf,W
+    bnz   s_seq6    ;not a device numbered switch
+    call  dn_sod    ;do a device numbered response
+s_seq6  incf  Incount   ;for next input
     call  sendTX
     call  dely
+    clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
     btfsc PORTC,3
     incf  Tx1d0,F     ;off
+    movff Incount,Tx1d4
     incf  Tx1d4
+    call  ev_match
+    movwf,W
+    bnz   s_seq7    ;not a device numbered switch
+    call  dn_sod    ;do a device numbered response
+s_seq7  incf  Incount   ;for next input
     call  sendTX
     call  dely
+    clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
     btfsc PORTC,4
     incf  Tx1d0,F     ;off
+    movff Incount,Tx1d4
     incf  Tx1d4
+    call  ev_match
+    movwf,W
+    bnz   s_seq8    ;not a device numbered switch
+    call  dn_sod    ;do a device numbered response
+s_seq8  incf  Incount   ;for next input
     call  sendTX
     call  dely
+    clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
     btfsc PORTC,5
     incf  Tx1d0,F     ;off
+    movff Incount,Tx1d4
     incf  Tx1d4
+    call  ev_match
+    movwf,W
+    bnz   s_seq9    ;not a device numbered switch
+    call  dn_sod    ;do a device numbered response
+s_seq9  incf  Incount   ;for next input
     call  sendTX
     call  dely
+    clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
     btfsc PORTC,6
     incf  Tx1d0,F     ;off
+    movff Incount,Tx1d4
     incf  Tx1d4
+    call  ev_match
+    movwf,W
+    bnz   s_seq10   ;not a device numbered switch
+    call  dn_sod    ;do a device numbered response
+s_seq10 incf  Incount   ;for next input
     call  sendTX
     call  dely
+    clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
     btfsc PORTC,7
     incf  Tx1d0,F     ;off
+    movff Incount,Tx1d4
     incf  Tx1d4
-    call  sendTX
+    call  ev_match
+    movwf,W
+    bnz   s_seq11   ;not a device numbered switch
+    call  dn_sod    ;do a device numbered response
+s_seq11 call  sendTX    ;last input
     return
     
 route movf  Rx0d0,W
@@ -2680,10 +2734,10 @@ ss_in1  movf  EVtemp,F
 get_in  movf  In_roll,W
     andwf PORTC,W
     bz    ss_low
-    movlw 0x94
+    movlw 0x99
     movwf Tx1d0   ;an off state
     bra   ss_in2
-ss_low  movlw 0x93
+ss_low  movlw 0x98
     movwf Tx1d0
 ss_in2  movff Rx0d3,Tx1d3 ;put device no in Tx buffer
     movff Rx0d4,Tx1d4
@@ -2794,7 +2848,27 @@ enloop  movlw 0
     incf  EEADR
     decfsz  Count
     bra   enloop
-    return  
+    return
+
+;***********************************************************************
+;   gets device number for switch input for a SOD sequence
+;   ENcount has event number for that switch
+
+dn_sod    movlw LOW ENstart
+    movwf EEADR
+    bcf STATUS,C      ;just in case
+    rlncf ENcount,F   ;4 bytes per event
+    rlncf ENcount,W
+    addlw 2       ;just the last two event bytes are the DN
+    addwf EEADR
+    call  eeread
+    movwf Tx1d3
+    incf  EEADR
+    call  eeread
+    bsf   Tx1d0,3     ;for short events
+    movwf Tx1d4   
+    
+    return
 
 ;************************************************************************
 
@@ -3033,12 +3107,13 @@ para1rd movlw 0x9B
     tblrd*
     movff TABLAT,Tx1d4
     bcf   EECON1,EEPGD
+paraend
     movff Rx0d3,Tx1d3
     movlw 5
     movwf Dlc
     call  sendTX
     return  
-
+    
 ;***********************************************************
 
 ; error message send
