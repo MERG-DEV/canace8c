@@ -1,9 +1,92 @@
-;     TITLE   "Source for CANACE8C/CANTOTI node for CBUS"
-; filename CANACE8C_v2k.asm 25-Jul-13 PJW
+    TITLE   "Source for CANACE8C/CANTOTI/CANMIO node for CBUS"
+
+MAJOR_VER   equ .2      ;Firmware major version (numeric)
+MINOR_VER   equ "n"     ;Firmware minor version (alpha)
+BETA_VER    equ .0    ;Firmware beta version (numeric, 0 = Release)
+AUTOID      equ .0      ;Include automatic CAN ID enumeration (this may cause problems with CANCAN)
+
+;Define CANTOTI for a TOTI module
+;Define CANMIO for CANMIO hardware
+
+; Date    Rev   By  Notes
+; 17-Jun-14 v2n   PJW v2n release
+; 10-Jun-14 v2n11 PJW Input specific SOD inhibit now coded for new FCU.
+;           Also returns physical PIC in node properties
+; 25-May-14 v2n10 PJW SOD now won't now send OFF event for an ON only input
+;         PJW "Expanded Mode" now inhibits SOD for input is bit is 1
+; 23-May-14     PJW Test version to check for issues
+; 22-May-14 v2n9  PJW Ignore input changes for the first 2 seconds after powerup
+; 14-May-14     PJW Removed unwanted CANMIOTOTI option
+; 22-Apr-14 v2n8  PW  Simplified hardware/software defines
+; 21-Apr-14 v2n8  PB  Added CPUM_MICROCHIP
+; 21-Apr-14 v2n8  PW  Synchronise with Pete Brownlows changes
+; 19-Feb-14 v2n7  BV  Revised AUTOID logic
+; 10-Feb-14 v2n6  PJW CANID enumeration now optional (see AUTOID)
+;  8-Feb-14 v2n5  PJW Fixed bug introduced in 2k that caused spurious events on powerup
+;  3-Feb-14     PJW Bit of a tidy up
+;  1-Feb-14     PJW Added beta revision in parameter #20
+; 27-Jan-14     PJW Synchronised various changes
+; 27-Jan-14     RH  Updated CANID enumeration
+; 24-Jan-14     PJW Now monitoring bus events to keep push button modes in step
+; 24-Jan-14     PJW Updated to use cbusdefs8g.inc; hard coded opcodes now symbolic
+;  3-Sep-13 v2m   BV  Added 'Route Event' on specific input change
+;           Auto self enumerate on CANID Conflict
+;           RH  NVNUM set to 8, Add Bob's change to CanId conflict test
+;     v102m   RH  development version to test auto CAN Id enumeration
+;           NV_NUM set to 7 for now so it works with FCU
+;             change include file to cbusdefs8f.inc
+; 26-Jul-13 v2k   PJW Added optional push button toggle input mode
+;           This source file now builds CANACE8C and CANTOTI firmware
+;           Requires FCU V1.4.7.9 or later to configure this mode
+; 14-Oct-12 v2j   PJW Added optional input inversion and input delay controls
+;           Corrected event initialisation & firmware ID
+; 24-Jul-12 v2h     Changes for new self-enum as subroutine. new OpCodes 0x5D and 0x75 for self enum. 
+;       v2g     Change parameters to new format
+;       v2f     Correct error codes when reading events, fix bug in evsend
+;       v2e     Add check for zero index reading parameters
+;       v2d     Fix bug when reponding to SOD, Txld3 not cleared
+;           leaving device ms byte in buffer for following no-device inputs
+;       v2c     Allow QNN to work in SLiM mode
+;       v2b     Change reply to QNN to OPC_PNN
+;       v2a     First release build
+;       102e    Change CAN initialisation code for extended frams bug
+;       102d    set RXM0 in RXB0CON and RXB1CON
+;       102c    remove fix for extended frames - test
+;     102_a     First version wrt CBUS Developers Guide
+;           Add code to support 0x11 (RQMN)
+;           Add code to return 8th parameter by index - Flags
+; 28-Jul-11 x     Polling inputs (short mode) gives a response of 0x9D for ON and 0x9E for OFF
+;           Added WRACK to all EEPROM write sequences. Added error responses.
+;     w     Now produces short events on a SOD if the inputs have a 'device number'.
+;           same short events with a short poll (0x9A) to a device no.
+;     v     Corrected bug so now responds to a RTR in SLiM mode.
+;     u       Revert to allowing Boot and Read Params in SLiM mode with nodes NN
+;  7-Mar-11 t       Only allow Boot with NN of zero. Allow read params by index in slim mode with NN of zero
+; 19-Jan-11 s     Added short event output events if there is an allocated 'device number'. (Modes 8 to 15 set)
+; 12-Dec-10 r     Added response to short events and also mode for individual event polling. 04/12/10
+;           Modes 8 to 15 correspond to inputs 1 to 8
+;           Short events taught with the mode set to 8 - 15 give a response matching inputs
+;           1 to 8. Poll with event 0x9A using the lower two bytes for the 'device number'
+;           Fix in 'route' routine for short mode events
+;           Changes to state sequence and route routines for short event requests and responses.
+;     q     Added clear of RXB overflow flags in COMSTAT
+; 24-Mar-10 p     new enum scheme (no rev o)
+; 17-Mar-10 n     Prevent eror messages in unset
+;  2-Mar-10 m     Added facility to trigger mode 1 events using the PB in SLiM mode
+;     k     Roger's mods to TXB2CON
+;     j     Mods to RTR and Unlearn
+; 27-Jan-10 h     Added NNACK for config, Block to non supported Events in SLiM
+; 30-Dec-09       Mods to bootloader for LEDs and WDT
+; 28-Nov-09 g     Changed read of EVs so it is not in read mode  
+; 27-Nov-09 f     Added bootloader and other OPCs for full FLiM / SLiM version 
+;           Incorporated NV for setting individual inputs to ON / OFF or ON only 
+; 14-Nov-09       started changes for combined FLiM / SLiM
+;           incorporated ON only for SLiM. NN range now 64
+
 ; Uses 4 MHz resonator and PLL for 16 MHz clock
 ; This is an 8 input FLiM producer node with readout.
 ; Has 8 switch / logic inputs with pullups.
-; Uses a 6 way DIP switch to set base NN and CAN ID (unless set otherwise)and 
+; Uses a 6 way DIP switch to set base NN and CAN ID (unless set otherwise) and 
 ; for learning request events (learn + unlearn)
 ; Sends 8 ON / OFF events using the 32 bit EN protocol.
 ; Sends response event with the inputs as the LSbyte
@@ -12,32 +95,9 @@
 ; This source file can also generate CANTOTI code by defining 'CANTOTI'
 
 ; The setup timer is TMR3. This should not be used for anything else
-; CAN bit rate of 125 Kbits/sec
-; Standard frame only
-
+; CAN bit rate of 125 Kbits/sec, Standard frame only
 
 ; this code is for 18F2480
-
-
-; event command is 90h (on) and 91h (off) for now.
-; This code includes the CAN ID enumeration readback (FLiM compatibility)
-; The NN and CAN ID are set by the 4 DIP switches. 
-
-; working as just a producer as per CANACE8  02/12/07
-
-; now add the consumer bits
-
-;seems to be working. not tried unlearn yet.
-;If the request event is 0x90 or 0x91 (ON or OFF) the response is an ON or OFF
-;If the request event is 0x92 (request), then the response is 0x93 (info)
-;The node adds a 1 to the EN hi byte to distinguish response ON / OFF from change 
-;triggered events.
-
-;added node number change during running.  27/12/07
-;added erase of all ENs if reset with unlearn on.
-;added RUN LED 
-;added handling of short events for 'many' producers
-
 
 ;DIL switch ettings
 
@@ -47,125 +107,8 @@
 ; 4 NN select   MSB
 ; 5 Learn
 ; 6 Unlearn / reset
-
 ; 1 to 4 also select the response type when in learn mode. Must be put back to
 ; the NN after learning.
-
-
-;CANACE8Ca  as CANACE8C but with all self enumeration removed 31/01/08
-;Change to make NN and CAN ID the same
-;movff changed for TX buffer load
-
-;CANACE8Ca_2 is ACE8Ca modified for optional responses to a trigger event
-;Uses the NN setting switches during learn mode to select response type
-;Mode 00 is 8 successive events identical to an 'input change' event. Event is ON or
-;OFF depending on the input state. A low (0v) input generates an ON event.
-;Also has NN range extended by 3 bits using the spare inputs. Note, no jumper gives a 0 in the
-;NN, the opposite to the DIL switches. Allows the basic 1 to 16 NN without any jumpers.
-;Changed so there is no output following a learn. This was a problem with multiple ACE8C_2
-;modules if you wanted them to learn the same event e.g. for layout config readout.
-;mods to sendTX1
-;now CANACE8Cc_2.  Modified CANACE8Cb_2 for event type 0001
-;sends ON event in response to trigger. LSByte is 8 inputs. Bit 0 set in d3.
-;changed to CANACE8C rev d. 03/05/08
-;increased number of events
-;LED flashes when full
-;working OK  04/05/08
-;version e incorporates changes by Roger Healey to the scan routine for multiple simultaneous
-; input changes
-;04/05/08
-;Changed for Full Model  01/06/08
-;1st stage is to restore the self enumeration, leaving DIL switches for SLiM.
-;CAN_ID so it can be tested against other self enum. modules
-;mods to error handling
-;enum scheme seems OK now. 04/06/08
-;now add rest of FLiM. DIL switches not used now.
-;Problem found on the event numbers with the input switches. (may apply to CANACE8C as well)
-;Fixed by added clear of STATUS bit
-;setting and readback of NN working  05/06/08
-;Flash timer changed to TMR0.
-;NN readback (0x10)removed. Always sent in setup mode.
-;added node number release frame (0x51)
-;added keep alive frame  (0x52)
-;set learn mode (0x53)
-;out of learn mode (0x54)
-;clear all events (0x55)
-;read no. of events left (0x56)
-;set event in learn mode  (0xD2)  uses EV indexing
-;read event in learn mode (0xB2)
-;unset event in learn mode (0x95)
-;reply to 0xB2. (0xD3)Also sent if attempt to read / write too many EVs. EV# = 0 if too many.
-;set NV  in learn mode (0x96)
-;read NV (0x71)by NV index
-;reply to read NV (0x97)
-
-;read node parameters (0x10) Only works in setup mode. sends string of 7 bytes (0xEF)
-;corrected so it only responds to an ON event (0x90) 15/07/08
-;added NN check to rden  (0x56) 29/07/08
-;changed event readback for indexed EVs
-;Tx error interrupt disabled 5/8/08.  
-;mods to error handling in interupt
-;Tx error enabled 06/09/08
-
-; corrected flow control bug in SendTx1, as per Slim version m 29/04/09
-; version e - enhanced properties ?
-
-;started changes for combined FLiM / SLiM  14/11/09
-;incorporated ON only for SLiM. NN range now 64
-;rev f.  Incorporated NV for setting individual inputs to ON / OFF or ON only 
-;ACE8C_f  27/11/09. Added bootloader and other OPCs for full FLiM / SLiM version 
-;ACE8C_g  28/11/09  Changed read of EVs so it is not in read mode  
-;Mods to bootloader for LEDs and WDT  30/12/09
-;ACE8C_h  27/01/10  Added NNACK for config
-;Block to non supported Events in SLiM
-;Mods to RTR and Unlearn  rev j
-;Roger's mods to TXB2CON  rev k
-;Added facility to trigger mode 1 events using the PB in SLiM mode. Rev m  (no rev l)02/03/10
-;Prevent eror messages in unset. Rev n. (17/03/10)
-;Rev p. new enum scheme  24/03/10  (no rev o)
-;Rev q. Added clear of RXB overflow flags in COMSTAT
-;Rev r. Added response to short events and also mode for individual event polling. 04/12/10
-;   Modes 8 to 15 correspond to inputs 1 to 8
-;   Short events taught with the mode set to 8 - 15 give a response matching inputs
-;   1 to 8. Poll with event 0x9A using the lower two bytes for the 'device number'
-;   Response is 0x93 (input ON) or 0x94 (input off). The two MSbytes of this response is the Node
-;   Number, the two LSbytes is the 'device number'.
-;Fix in 'route' routine for short mode events
-;Changes to state sequence and route routines for short event requests and responses 12/12/10
-;Rev s  Added short event output events if there is an allocated 'device number'. (Modes 8 to 15 set)19/01/11.
-;Rev t  07/03/11 Only allow Boot with NN of zero. 
-;   Allow read params by index in slim mode with NN of zero
-;Rev u  Revert to allowing Boot and Read Params in SLiM mode with nodes NN
-;Rev v  Corrected bug so now responds to a RTR in SLiM mode.
-;Rev w  Now produces short events on a SOD if the inputs have a 'device number'.
-;   same short events with a short poll (0x9A) to a device no.
-;Rev x  Polling inputs (short mode) gives a response of 0x9D for ON and 0x9E for OFF (27/07/11)
-;   Added WRACK to all EEPROM write sequences. Added error responses. (28/07/11)
-
-;Rev 102_a  First version wrt CBUS Developers Guide
-;     Add code to support 0x11 (RQMN)
-;     Add code to return 8th parameter by index - Flags
-
-; Rev 102c  remove fix for extended frames - test
-; Rev 102d  set RXM0 in RXB0CON and RXB1CON
-; Rev 102e  Change CAN initialisation code for extended frams bug
-
-; Rev v2a First release build
-; Rev v2b Change reply to QNN to OPC_PNN
-; Rev v2c Allow QNN to work in SLiM mode
-; Rev v2d Fix bug when reponding to SOD, Txld3 not cleared
-;     leaving device ms byte in buffer for following
-;     no-device inputs
-; Rev v2e Add check for zero index reading parameters
-; Rev v2f Correct error codes when reading events, fix bug in evsend
-; Rev v2g Change parameters to new format
-; Rev v2h Changes for new self-enum as subroutine. new OpCodes 0x5D and 0x75 for self enum. 
-; Rev v2j Added optional input inversion and input delay controls (Phil Wheeler)
-;       Corrected event initialisation (Phil Wheeler)
-;     Corrected firmware ID (Phil Wheeler)
-; Rev v2k 25-Jul13 Added optional push button toggle input mode (Phil Wheeler)
-;     Single source file now builds CANACE8C and CANTOTI firmware
-;     Requires FCU V1.4.7.9 or later to configure this mode.
 
 ; Push Button Input Toggle Mode (added by Phil Wheeler, July 2013)
 ; If enabled for an input, this allows a push button on the input to alternately generate
@@ -246,45 +189,62 @@
   LIST  P=18F2480,r=hex,N=75,C=120,T=ON
 
   include   "p18f2480.inc"
-  include   "cbuslib/constants.inc"
-  
+  include   "cbuslib/cbusdefs.inc"
+
   ;definitions  Change these to suit hardware.
   
-S_PORT  equ PORTB ;setup switch
-S_BIT equ 0 
-LEARN   equ 4 ;learn switch in port A
-UNLEARN equ 5 ;unlearn switch in port A
+; Define module type code and name string for hardware and firmware variations
 
-CMD_ON  equ 0x90  ;on event
-CMD_OFF equ 0x91  ;off event
-CMD_REQ equ 0x92
-SCMD_ON equ 0x98
-SCMD_OFF  equ 0x99
-SCMD_REQ  equ 0x9A
-OPC_PNN equ 0xB6    ; reply to QNN
+        ifdef   CANMIO      ;CANMIO hardware
+S_PORT  equ PORTA       ;Setup Switch Port
+S_BIT equ 2         ;Setup Switch Bit
+MODULE_ID   equ MTYP_CANACE8MIO
+#define     MYNAME   "ACE8MIO"
+        else          ;CANACE8c hardware
+S_PORT  equ PORTB       ;Setup Switch Port
+S_BIT   equ 0         ;Setup Switch Bit 
+          ifdef CANTOTI
+MODULE_ID   equ MTYP_CANTOTI
+#define     MYNAME   "TOTI   "
+            else
+MODULE_ID   equ MTYP_CANACE8C
+#define     MYNAME   "ACE8C  "
+          endif
+        endif
+
+LPINT equ .10       ; Low Priority Interrupt time (mS)
+TMR1CN  equ 0x10000-(.4000000*LPINT/.1000)  ;Timer 1 count (counts UP)
+
+SUDELY  equ .2000 ;Startup delay (mS)
+
+LEARN   equ 4   ;learn switch in port A
+UNLEARN equ 5   ;unlearn switch in port A
 
 EN_NUM  equ .32   ;number of allowed events
 EV_NUM  equ 2   ;number of allowed EVs per event
 
-MIN_TIME  equ 2     ;minimum time for input change (*10mS) + 1
+MIN_TIME  equ 2       ;minimum time for input change (*10mS) + 1
 
-MAN_NO      equ MANU_MERG    ;manufacturer number
-MAJOR_VER   equ 2
-MINOR_VER   equ "K"
-    ifdef CANTOTI
-MODULE_ID   equ MTYP_CANTOTI  ; id to identify a CANTOTI module
-    else
-MODULE_ID   equ MTYP_CANACE8C   ; id to identify a CANACE8C module
-    endif
+MAN_NO      equ MANU_MERG     ;manufacturer number
+
 EVT_NUM     equ EN_NUM        ; Number of events
 EVperEVT    equ EV_NUM        ; Event variables per event
 
-NV_NUM      equ 7       ; Number of node variables
+NV_NUM      equ .9        ; Number of node variables
 NODEFLGS    equ PF_COMBI + PF_BOOT
 CPU_TYPE    equ P18F2480
 
 Modstat equ 1   ;address in EEPROM
 
+;Self enumeration bits stored in Datmode
+MD_NEWFRM equ 0 ;new frame received
+MD_SETUP  equ 1 ;in setup mode
+MD_NNWAIT equ 2 ;waiting for NN
+MD_FLRUN  equ 3 ;FLiM Run mode
+MD_EMSUP  equ 4 ;suppress error message
+MD_EVULN  equ 5 ;unlearn event
+MD_EVRD   equ 6 ;read event variable
+MD_IDCONF equ 7 ;ID conflict detected
 
 ; definitions used by bootloader
 
@@ -345,23 +305,6 @@ Modstat equ 1   ;address in EEPROM
   CONFIG  CP1 = OFF, CPB = OFF, CPD = OFF,WRT0 = OFF,WRT1 = OFF, WRTB = OFF
   CONFIG  WRTC = OFF,WRTD = OFF, EBTR0 = OFF, EBTR1 = OFF, EBTRB = OFF
 
-
-;set config registers
-  
-; __CONFIG  _CONFIG1H,  B'00100110' ;oscillator HS with PLL
-; __CONFIG  _CONFIG2L,  B'00001110' ;brown out voltage and PWT  
-; __CONFIG  _CONFIG2H,  B'00000000' ;watchdog time and enable (disabled for now)
-; __CONFIG  _CONFIG3H,  B'10000000' ;MCLR enable  
-; __CONFIG  _CONFIG4L,  B'10000001' ;B'10000001'  for   no debug
-; __CONFIG  _CONFIG5L,  B'00001111' ;code protection (off)  
-; __CONFIG  _CONFIG5H,  B'11000000' ;code protection (off)  
-; __CONFIG  _CONFIG6L,  B'00001111' ;write protection (off) 
-; __CONFIG  _CONFIG6H,  B'11100000' ;write protection (off) 
-; __CONFIG  _CONFIG7L,  B'00001111' ;table read protection (off)  
-; __CONFIG  _CONFIG7H,  B'01000000' ;boot block protection (off)
-
-; processor uses  4 MHz. Resonator
-
 ;********************************************************************************
 ; RAM addresses used by boot. can also be used by application.
 
@@ -409,15 +352,7 @@ Modstat equ 1   ;address in EEPROM
   IDtempl
   NN_temph  ;node number in RAM
   NN_templ
-  ;The WV_ variables MUST match the NV definitions and be in the same order
-  WV_ononly ;Working Variable: Bitmapped "on-only" flags
-  WV_invt   ;Working Variable: Bitmapped Input invert flags
-  WV_dlyd   ;Working Variable: Bitmapped Delayed input flags
-  WV_ontm   ;Working Variable: On Time (MIN_TIME..255)
-  WV_oftm   ;Working Variable: Off Time (MIN_TIME..255)
-  WV_push   ;Working Variable: Bitmapped "Push Button Toggle Input" flags
-  WV_mode   ;Working Variable: Expanded Mode
-  
+
   IDcount   ;used in self allocation of CAN ID.
   Datmode   ;flag for data waiting and other states
   Count   ;counter for loading
@@ -439,10 +374,6 @@ Modstat equ 1   ;address in EEPROM
   Dlc     ;data length
   Mode    ;used for Flim /SLiM
           ;the above variables must be in access space (00 to 5F)
-        
-  
-
-  
   
   Rx0con      ;start of receive packet 0
   Rx0sidh
@@ -478,7 +409,6 @@ Modstat equ 1   ;address in EEPROM
   Shift
   Shift1
   SN_temp   ;temp for short EV
-  
   
   Eadr    ;temp eeprom address
   
@@ -516,10 +446,20 @@ Modstat equ 1   ;address in EEPROM
   Enum11
   Enum12
   Enum13
+  Dummy1    ;Don't remove these otherwise odd things will happen
+  Dummy2    ;Not sure why, PJW May14
   
-  ;add variables to suit
+  WV_ononly ;Working Variable: Bitmapped "on-only" flags
+  WV_invt   ;Working Variable: Bitmapped Input invert flags
+  WV_dlyd   ;Working Variable: Bitmapped Delayed input flags
+  WV_ontm   ;Working Variable: On Time (MIN_TIME..255)
+  WV_oftm   ;Working Variable: Off Time (MIN_TIME..255)
+  WV_pbtg   ;Working Variable: Bitmapped "Push Button Toggle Input" flags
+  WV_route  ;Working Variable: Bitmapped Input trigger Route event
+  WV_isod   ;Working Variable: Inhibit SOD for input
+  WV_mode   ;Working Variable: Expanded Mode (for future use)
 
-  ;lpint variables
+;lpint variables
   Iin_curr      ;Current inputs
   Iin_delta     ;Last delta
   Iin_count0      ;Counter for input 0
@@ -531,7 +471,9 @@ Modstat equ 1   ;address in EEPROM
   Iin_count6      ;Counter for input 6
   Iin_count7      ;Counter for input 7
 
-    
+  SUtimer       ;Startup timer
+
+
   ENDC
   
   CBLOCK  0x100   ;bank 1
@@ -882,7 +824,7 @@ f
 ; Config memory = 0x300000
 ; EEPROM data = 0xF00000
   
-; ************************************************************ ** * 
+
 ; ************************************************************** * 
 ; Function: VOID _PMRead()
 ; VOID _PMEraseWrite ()
@@ -1138,7 +1080,7 @@ _CANSendBoot
 ;
 ;   start of program code
 
-    ORG   0800h
+    org RESET_VECT
 loadadr   
     nop           ;for debug
     goto  setup
@@ -1147,35 +1089,36 @@ loadadr
     goto  hpint     ;high priority interrupt
     
     ORG   0810h     
-    ifdef CANTOTI
-myName  db  "TOTI   "   
-    else
-myName  db  "ACE8C  "
-    endif
+myName  db    MYNAME      ;module name (7 characters)
     
     ORG   0818h 
     goto  lpint     ;low priority interrupt
 
-    ORG   0820h
+    ORG   0820h     ;Main parameters
+nodeprm db  MAN_NO, MINOR_VER ;1-2
+    db  MODULE_ID, EVT_NUM  ;3-4
+    db  EVperEVT, NV_NUM  ;5-6
+    db  MAJOR_VER,NODEFLGS  ;7-8
+    db  CPU_TYPE,PB_CAN     ;9-10 
+        dw  RESET_VECT        ;11-12 Load address for module code above bootloader
+        dw  0               ;13-14 Top 2 bytes of 32 bit address not used
+    dw  0         ;15-16 CPU Manufacturers ID low
+    dw  0         ;17-18 CPU Manufacturers ID high
+    db  CPUM_MICROCHIP,BETA_VER     ;19-20 CPU Manufacturers code, Beta revision
+sparprm fill 0,prmcnt-$     ;Unused parameter space set to zero
 
-nodeprm     db  MAN_NO, MINOR_VER, MODULE_ID, EVT_NUM, EVperEVT, NV_NUM 
-      db  MAJOR_VER,NODEFLGS,CPU_TYPE,PB_CAN    ; Main parameters
-            dw  RESET_VECT     ; Load address for module code above bootloader
-            dw  0           ; Top 2 bytes of 32 bit address not used
-sparprm     fill 0,prmcnt-$ ; Unused parameter space set to zero
+PRMCOUNT equ sparprm-nodeprm ; Number of parameter bytes implemented
 
-PRMCOUNT    equ sparprm-nodeprm ; Number of parameter bytes implemented
+        ORG 0838h
 
-             ORG 0838h
-
-prmcnt      dw  PRMCOUNT    ; Number of parameters implemented
-nodenam     dw  myName      ; Pointer to module type name
-            dw  0 ; Top 2 bytes of 32 bit address not used
+prmcnt  dw  PRMCOUNT    ; Number of parameters implemented
+nodenam dw  myName      ; Pointer to module type name
+        dw  0 ; Top 2 bytes of 32 bit address not used
 
 
-PRCKSUM     equ MAN_NO+MINOR_VER+MODULE_ID+EVT_NUM+EVperEVT+NV_NUM+MAJOR_VER+NODEFLGS+CPU_TYPE+PB_CAN+HIGH myName+LOW myName+HIGH loadadr+LOW loadadr+PRMCOUNT
+PRCKSUM equ MAN_NO+MINOR_VER+MODULE_ID+EVT_NUM+EVperEVT+NV_NUM+MAJOR_VER+NODEFLGS+CPU_TYPE+PB_CAN+HIGH myName+LOW myName+HIGH loadadr+LOW loadadr+PRMCOUNT+CPUM_MICROCHIP+BETA_VER
 
-cksum       dw  PRCKSUM     ; Checksum of parameters
+cksum   dw  PRCKSUM     ; Checksum of parameters
 
 ;*******************************************************************
 
@@ -1195,9 +1138,7 @@ hpint movff CANCON,TempCANCON
     movff FSR1L,Fsr_temp1L    ;save FSR1
     movff FSR1H,Fsr_temp1H
     
-    
-
-    movlw 8           ;for relocated code
+    movlw 8     ;for relocated code
     movwf PCLATH
     movf  TempCANSTAT,W     ;Jump table
   
@@ -1219,7 +1160,7 @@ rxb1int bcf   PIR3,RXB1IF   ;uses RB0 to RB1 rollover so may never use this
     goto  access
     
 rxb0int bcf   PIR3,RXB0IF
-    btfsc Datmode,1     ;setup mode?
+    btfsc Datmode,MD_SETUP  ;setup mode?
     bra   setmode 
     lfsr  FSR0,Rx0con
     
@@ -1251,7 +1192,7 @@ access  movf  CANCON,W        ;switch buffers
     movwf CANCON
     movf  TempCANSTAT,W
     andlw B'00001110'
-    iorwf CANCON
+    iorwf CANCON,F
     lfsr  FSR1,RXB0CON  ;this is switched bank
 load  movf  POSTINC1,W
     movwf POSTINC0
@@ -1266,13 +1207,25 @@ load  movf  POSTINC1,W
 ;   bra   setmode 
     movf  Rx0dlc,F      ;ignore any zero data frames
     bz    back
-;   btfss Rx0sidl,3   ;ignore extended frames
-    bsf   Datmode,0   ;valid message frame  
-    
+;   btfss Rx0sidl,3     ;ignore extended frames
+    bsf   Datmode,MD_NEWFRM ;valid message frame
+#if AUTOID    
+    btfss Mode,1        ;FLim Mode?
+    bra   back        ; dont do Can ID check if SLiM mode
+    ;check for ID conflict
+    movf  Rx0sidh,w   ;get received IDHi
+    xorwf Tx1sidh,w   ;compare with our IDHi
+    andlw 0x0f      ;Bob's update
+    bnz   back      ;skip if not matched
+    movf  Rx0sidl,w   ;get received IDLo
+    xorwf Tx1sidl,w   ;compare with our IDLo
+    andlw 0xe0      ;Bob's revised update
+    bnz   back      ;skip if not matched
+    bsf   Datmode,MD_IDCONF ;flag ID conflict   
+#endif    
 back  bcf   RXB0CON,RXFUL ;ready for next
   
-  
-back1 clrf  PIR3      ;clear all flags
+back1 clrf  PIR3      ;clear all interrupt flags
     movf  CANCON,W
     andlw B'11110001'
     iorwf TempCANCON,W
@@ -1288,7 +1241,7 @@ back1 clrf  PIR3      ;clear all flags
     
     retfie  1       ;use shadow registers
     
-isRTR btfsc Datmode,1   ;setup mode?
+isRTR btfsc Datmode,MD_SETUP;setup mode?
     bra   back      ;back    
 ;   btfss Mode,1      ;FLiM?    corrected in rev v
 ;   bra   back
@@ -1327,11 +1280,8 @@ enum_2  dcfsnz  IDcount,F
     rlncf Roll,F
     bra   enum_2
 enum_3  movf  Roll,W
-    iorwf INDF1,F
-
-    
-    bra   back
-
+    iorwf INDF1,F 
+    bra   back  
 
 ;**************************************************************
 ; low priority interrupt, called every 10mS
@@ -1345,9 +1295,14 @@ lpint movwf W_tempL       ;Save registers
 ;   movff PCLATH,PCH_tempL  ;save PCLATH
 ;   clrf  PCLATH
 
-    movlw 0x78        ;Timer 1 lo byte. (adjust if needed)
+    movlw LOW TMR1CN      ;Set low byte of interrupt rate
     movwf TMR1L       ;reset timer 1
     clrf  PIR1        ;clear all timer flags
+    
+    movf  SUtimer,W     ;check startup timer
+    bz    lpint0        ;already zero
+    decf  SUtimer
+lpint0    
 
 ;   btg   PORTB,7       ;toggle green LED for now
     movf  PORTC,W       ;read inputs
@@ -1358,7 +1313,7 @@ lpint movwf W_tempL       ;Save registers
 ; One or more inputs in W have changed
 
     movwf Iin_delta     ;save changed bits
-    xorwf Iin_curr      ;save current bits
+    xorwf Iin_curr,F      ;save current bits
 
 ; Check input 0
 
@@ -1534,7 +1489,8 @@ lpend movff Bsr_tempL,BSR   ;End of low priority interrupt
 ;*********************************************************************
 ; main waiting loop
 
-main  btfsc Mode,1      ;is it SLiM?
+main  
+    btfsc Mode,1      ;is it SLiM?
     bra   mainf     ;no
 
 mains             ;is SLiM
@@ -1547,21 +1503,31 @@ nofl_s  bra   noflash       ;main1
     
 ; here if FLiM mde
 
-mainf btfss INTCON,TMR0IF   ;is it flash?
+mainf
+#if AUTOID    
+    btfss Datmode,MD_IDCONF
+    bra   mainf_1
+    call  self_enA
+    movlw B'00001000'   ;back to normal running
+    movwf Datmode   
+    
+mainf_1
+#endif
+    btfss INTCON,TMR0IF   ;is it flash?
     bra   noflash
-    btfss Datmode,2
+    btfss Datmode,MD_NNWAIT
     bra   nofl1
     
     btg   PORTB,6     ;flash yellow LED
     
 nofl1 bcf   INTCON,TMR0IF
-    btfss Datmode,3   ;running mode
+    btfss Datmode,MD_FLRUN  ;running mode
     bra   noflash
     decfsz  Keepcnt     ;send keep alive?
     bra   noflash
     movlw .10
     movwf Keepcnt
-    movlw 0x52
+    movlw OPC_NNACK
 ;   call  nnrel     ;send keep alive frame (works OK, turn off for now)
 
 noflash btfsc S_PORT,S_BIT  ;setup button?
@@ -1572,7 +1538,7 @@ noflash btfsc S_PORT,S_BIT  ;setup button?
     clrf  Count2
 wait  decfsz  Count2
     goto  wait
-    btfss Datmode,2
+    btfss Datmode,MD_NNWAIT
     bra   wait2
     btfss INTCON,TMR0IF   ;is it flash?
     bra   wait2
@@ -1589,7 +1555,6 @@ wait2 decfsz  Count1
     clrf  Datmode     ;back to virgin
 ;   bcf   Mode,1      ;SLiM mode
     bcf   PORTB,6     ;yellow off
-    
     bsf   PORTB,7     ;Green LED on
     clrf  INTCON      ;interrupts off
     movlw 1
@@ -1598,7 +1563,7 @@ wait2 decfsz  Count1
     movwf EEADR
     movlw   0
     call  eewrite     ;status to reset
-    movlw 0x51      ;send node release frame
+    movlw OPC_NNREL   ;send node release frame
     call  nnrel
     clrf  NN_temph
     clrf  NN_templ
@@ -1608,7 +1573,6 @@ wait1 btfss S_PORT,S_BIT
     btfss S_PORT,S_BIT
     bra   wait1
   
-    
     movlw LOW NodeID      ;put NN back to 0000
     movwf EEADR
     movlw 0
@@ -1637,9 +1601,9 @@ main5 movlw Modstat
     call  eewrite       ;mode to FLiM in EEPROM
     bsf   Mode,1        ;to FLiM
     call  self_en       ;self enumerate routine
-    bcf   Datmode,1
+    bcf   Datmode,MD_SETUP
     call  nnack       ;send request for NN
-    bsf   Datmode,2
+    bsf   Datmode,MD_NNWAIT
 ;   movlw Modstat       ;only if needed
 ;   movwf EEADR
 ;   movlw B'00000100'
@@ -1647,13 +1611,13 @@ main5 movlw Modstat
     bra   main1
 
 
-main4 ;btfss  Datmode,3   
+main4 ;btfss  Datmode,MD_FLRUN    
     ;bra    main3
-    btfss Datmode,2
+    btfss Datmode,MD_NNWAIT
     bra   mset2
-    bcf   Datmode,2
+    bcf   Datmode,MD_NNWAIT
     bsf   PORTB,6     ;LED on
-    movlw 0x52
+    movlw OPC_NNACK
     call  nnrel
     movlw Modstat
     movwf EEADR
@@ -1662,35 +1626,31 @@ main4 ;btfss  Datmode,3
     call  eewrite
     bra   main3
     
-mset2 bsf   Datmode,2
+mset2 bsf   Datmode,MD_NNWAIT
     call  self_en
-    bcf   Datmode,1
+    bcf   Datmode,MD_SETUP
     call  nnack
     bra   main1
 
-main3 btfss Datmode,1   ;setup mode ?
+main3 btfss Datmode,MD_SETUP    ;setup mode ?
     bra   main1
 ;   call  self_en
 
-    bcf   Datmode,1   ;out of setup
-    bsf   Datmode,2   ;wait for NN
+    bcf   Datmode,MD_SETUP    ;out of setup
+    bsf   Datmode,MD_NNWAIT   ;wait for NN
 ;   call  nnack     ;send blank NN for config
   
-;   
 ;   bsf   PORTB,7     ;on light
     bra   main1     ;continue normally
 
-go_FLiM bsf   Datmode,1   ;FLiM setup mode
+go_FLiM bsf   Datmode,MD_SETUP    ;FLiM setup mode
     bcf   PORTB,7     ;green off
     bra   wait1
     
-    
-
 ; common to FLiM and SLiM   
-  
-  
+
 main1 
-    btfsc Datmode,0   ;any new CAN frame received?
+    btfsc Datmode,MD_NEWFRM   ;any new CAN frame received?
     bra   packet      ;yes
     bra   do        ;look for inputs
 
@@ -1702,16 +1662,16 @@ go_on_x goto  go_on
 
 ;********************************************************
 
-unset ;bsf    Datmode,5   ;unlearn this event
+unset ;bsf    Datmode,MD_EVULN    ;unlearn this event
     ;bra    go_on
-    btfss   Datmode,4
+    btfss   Datmode,MD_EMSUP
     bra   main2       ;prevent error messages on OPC 0x95
-    bsf   Datmode,5
+    bsf   Datmode,MD_EVULN
     bra   learn1
 
-readEV  btfss Datmode,4
+readEV  btfss Datmode,MD_EMSUP
     bra   main2     ;prevent error message
-    bsf   Datmode,6   ;read back an EV
+    bsf   Datmode,MD_EVRD   ;read back an EV
     bra   learn1
 
 evns1 call  thisNN        ;read event numbers
@@ -1721,9 +1681,9 @@ evns1 call  thisNN        ;read event numbers
     bra   main2
 ;evns3  goto  notNN
 
-sendNN  btfss Datmode,2   ;in NN set mode?
+sendNN  btfss Datmode,MD_NNWAIT   ;in NN set mode?
     bra   main2     ;no
-    movlw 0x50      ;send back NN
+    movlw OPC_RQNN    ;send back NN
     movwf Tx1d0
     movlw 3
     movwf Dlc
@@ -1737,7 +1697,7 @@ reval call  thisNN        ;read event numbers
     bra   main2
 
 name
-    btfss Datmode,2   ;only in setup mode
+    btfss Datmode,MD_NNWAIT   ;only in setup mode
     bra   main2
     call  namesend
     bra   main2
@@ -1761,84 +1721,90 @@ paramsx goto  params
 
                 ;main packet handling is here
     
-packet  movlw CMD_ON  ;only ON and REQ events supported
-    subwf Rx0d0,W ;now add FLiM commands as well
-    bz    go_on_x
-    
-    movlw CMD_REQ
+packet  movlw OPC_ACON
     subwf Rx0d0,W
     bz    go_on_x
-    movlw SCMD_ON
+    movlw OPC_ACOF
+    subwf Rx0d0,W
+    bz    go_on_x
+    movlw OPC_AREQ
+    subwf Rx0d0,W
+    bz    go_on_x
+
+    movlw OPC_ASON
     subwf Rx0d0,W
     bz    short
-  
-    movlw SCMD_REQ
+    movlw OPC_ASOF
     subwf Rx0d0,W
     bz    short
-    movlw 0x5C      ;reboot
+    movlw OPC_ASRQ
+    subwf Rx0d0,W
+    bz    short
+
+    movlw OPC_BOOT      ;reboot
     subwf Rx0d0,W
     bz    reboot
-    movlw 0x73
+    movlw OPC_RQNPN
     subwf Rx0d0,W
     bz    para1a      ;read individual parameters
-    movlw 0x0d      ; QNN
+    movlw OPC_QNN     ; QNN
     subwf Rx0d0,w
     bz    doQnn
     btfss Mode,1      ;FLiM?
     bra   main2
-    movlw 0x42      ;set NN on 0x42
+    movlw OPC_SNN     ;set NN on 0x42
     subwf Rx0d0,W
     bz    setNN
-    movlw 0x10      ;read manufacturer
+    movlw OPC_RQNP    ;read manufacturer
     subwf Rx0d0,W
     bz    paramsx     ;read node parameters
-    movlw 0x11
+    movlw OPC_RQMN
     subwf Rx0d0,w
     bz    name      ;read module name   
-    movlw 0x53      ;set to learn mode on 0x53
+    movlw OPC_NNLRN   ;set to learn mode on 0x53
     subwf Rx0d0,W
     bz    setlrn    
-    movlw 0x54      ;clear learn mode on 0x54
+    movlw OPC_NNULN   ;clear learn mode on 0x54
     subwf Rx0d0,W
     bz    notlrn
-    movlw 0x55      ;clear all events on 0x55
+    movlw OPC_NNCLR   ;clear all events on 0x55
     subwf Rx0d0,W
     bz    clrens
-    movlw 0x56      ;read number of events left
+    movlw OPC_NNEVN   ;read number of events left
     subwf Rx0d0,W
     bz    rden
-    movlw 0xD2      ;is it set event?
+    movlw OPC_EVLRN   ;is it set event?
     subwf Rx0d0,W
     bz    chklrn      ;do it
-    movlw 0x95      ;is it unset event
+    movlw OPC_EVULN   ;is it unset event
     subwf Rx0d0,W     
     bz    unset
-    movlw 0xB2      ;read event variables
+    movlw OPC_REQEV   ;read event variables
     subwf Rx0d0,W
     bz    readEV
   
-    movlw 0x71      ;read NVs
+    movlw OPC_NVRD    ;read NVs
     subwf Rx0d0,W
     bz    readNV1
-    movlw 0x96      ;set NV
+    movlw OPC_NVSET   ;set NV
     subwf Rx0d0,W
     bz    setNV
-    movlw 0x57      ;is it read events
+    movlw OPC_NERD    ;is it read events
     subwf Rx0d0,W
     bz    readEN1
-    movlw 0x72
+    movlw OPC_NENRD
     subwf Rx0d0,W
     bz    readENi     ;read event by index
-    movlw 0x58
+    movlw OPC_RQEVN
     subwf Rx0d0,W
     bz    evns
-    movlw 0x9C      ;read event variables by EN#
+    movlw OPC_REVAL   ;read event variables by EN#
     subwf Rx0d0,W
     bz    reval
-    movlw 0x5D      ;re-enumerate
+    movlw OPC_ENUM    ;re-enumerate
     subwf Rx0d0,W
     bz    enum1
-    movlw 0x75      ;force new CAN_ID
+    movlw OPC_CANID   ;force new CAN_ID
     subwf Rx0d0,W
     bz    newID1
     bra   main2
@@ -1859,7 +1825,7 @@ reboot1 movlw 0xFF
     call  eewrite     ;set last EEPROM byte to 0xFF
     reset         ;software reset to bootloader
         
-main2 bcf   Datmode,0
+main2 bcf   Datmode,MD_NEWFRM
     goto  main      ;loop
     
 para1a  
@@ -1875,19 +1841,19 @@ newID call  thisNN
     movff Rx0d3,IDcount
 
     call  here2       ;put in as if it was enumerated
-    movlw 0x52
+    movlw OPC_NNACK
     call  nnrel       ;acknowledge new CAN_ID
     goto  main2
     
-setNN btfss Datmode,2   ;in NN set mode?
+setNN btfss Datmode,MD_NNWAIT   ;in NN set mode?
     bra   main2     ;no
     call  putNN     ;put in NN
-    bcf   Datmode,2
-    bsf   Datmode,3
+    bcf   Datmode,MD_NNWAIT
+    bsf   Datmode,MD_FLRUN
     bcf   PORTB,7     ;green LED off
     movlw .10
     movwf Keepcnt     ;for keep alive
-    movlw 0x52
+    movlw OPC_NNACK
     call  nnrel     ;confirm NN set
     bsf   PORTB,6     ;LED ON
     bra   main2
@@ -1897,16 +1863,16 @@ rden  goto  rden1
 setlrn  call  thisNN
     sublw 0
     bnz   notNN
-    bsf   Datmode,4
+    bsf   Datmode,MD_EMSUP
 ;   bsf   PORTB,6     ;LED on
     bra   main2
 
 notlrn  call  thisNN
     sublw 0
     bnz   notNN
-    bcf   Datmode,4
+    bcf   Datmode,MD_EMSUP
 notln1    ;leave in learn mode
-    bcf   Datmode,5
+    bcf   Datmode,MD_EVULN
 ;   bcf   PORTB,6
     bra   main2
 clrens  call  thisNN
@@ -1921,7 +1887,7 @@ clrerr  movlw 2     ;not in learn mode
 go_on btfss Mode,1      ;FLiM?
     bra   go_on_s     ; j if SLiM
   
-go_on2  ;movlw  0x90      ;is it an ON or request event?
+    ;movlw  OPC_ACON    ;is it an ON or request event?
     ;subwf  Rx0d0,W     ;only here if it is.
     ;bnz  main2
 go_on1  call  enmatch
@@ -1933,7 +1899,7 @@ go_on_s btfss PORTA,LEARN
     bra   learn1      ;is in learn mode
     bra   go_on1
 
-chklrn  btfsc Datmode,4
+chklrn  btfsc Datmode,MD_EMSUP
     bra   learn1      ;is in learn mode
 ;   movlw 2       ;errror not in learn mode
 ;   call  errsub
@@ -1945,7 +1911,7 @@ readENi call  thisNN      ;read event by index
     call  enrdi
     bra   main2
 
-params  btfsc Datmode,2   ;only in setup mode
+params  btfsc Datmode,MD_NNWAIT   ;only in setup mode
     bra   para1b
 ;   movlw 3
 ;   call  errsub
@@ -1971,8 +1937,8 @@ readEN  call  thisNN
     bnz   notNN
     call  enread
     bra   main2
-do_it 
-    call  ev_set      ;do it
+
+do_it call  ev_set      ;do it
     bra   main2
     
 rden1 call  thisNN
@@ -1983,7 +1949,7 @@ rden1 call  thisNN
     call  eeread
     sublw EN_NUM
     movwf Tx1d3
-    movlw 0x70
+    movlw OPC_EVNLF
     movwf Tx1d0
     movlw 4
     movwf Dlc
@@ -1992,13 +1958,13 @@ rden1 call  thisNN
 
 learn1  btfss Mode,1      ;FLiM?
     bra   learn2
-    movlw 0xD2
+    movlw OPC_EVLRN
     subwf Rx0d0,W     ;is it a learn command
     bz    learn2      ;OK
-    movlw 0x95      ;is it unlearn
+    movlw OPC_EVULN   ;is it unlearn
     subwf Rx0d0,W
     bz    learn2
-    movlw 0xB2
+    movlw OPC_REQEV
     subwf Rx0d0
     bz    learn2
     bra   l_out2    
@@ -2015,9 +1981,9 @@ learn2  call  enmatch     ;is it there already?
     bz    new_EV
     bra   l_out2      ;too many
     
-learn3  btfsc Datmode,6   ;read EV?
+learn3  btfsc Datmode,MD_EVRD ;read EV?
     bra   rdbak1      ;not here
-    btfsc Datmode,5   ;if unset and not here
+    btfsc Datmode,MD_EVULN  ;if unset and not here
     bra   l_out1      ;do nothing else 
 learn4  call  learnin     ;put EN into stack and RAM
     sublw 0
@@ -2030,7 +1996,7 @@ isthere btfsc Mode,1
     btfss PORTA,UNLEARN ;is it here and unlearn,goto unlearn
     bra   unlearn     ;else modify EVs
 
-isth1 btfss Datmode,5   ;FLiM unlearn?
+isth1 btfss Datmode,MD_EVULN    ;FLiM unlearn?
     bra   mod_EV
     bra   unlearn
 
@@ -2038,7 +2004,7 @@ enum  call  thisNN
     sublw 0
     bnz   notNN1
     call  self_en
-    movlw 0x52
+    movlw OPC_NNACK
     call  nnrel     ;send confirm frame
     movlw B'00001000'   ;back to normal running
     movwf Datmode
@@ -2056,7 +2022,7 @@ rdbak1  clrf  Tx1d5       ;no match
     clrf  Tx1d6
   
 
-shift4  movlw 0xD3        ;readback of EVs
+shift4  movlw OPC_EVANS     ;readback of EVs
     movwf Tx1d0
     movff Rx0d1,Tx1d1
     movff Rx0d2,Tx1d2
@@ -2112,7 +2078,7 @@ mod_EVf movff Rx0d5,EVtemp  ;store EV index
     movwf EEADR
     movf  EVtemp,W      ;add index to EEPROM value
     addwf EEADR,F
-    btfsc Datmode,6     ;is it readback
+    btfsc Datmode,MD_EVRD     ;is it readback
     bra   rdbak
     movf  EVtemp2,W
     call  eewrite       ;put in
@@ -2122,10 +2088,10 @@ mod_EVf movff Rx0d5,EVtemp  ;store EV index
 
       
 
-l_out bcf   Datmode,4
+l_out bcf   Datmode,MD_EMSUP
 ;   bcf   LED_PORT,LED2
-l_out1  bcf   Datmode,6
-l_out2  bcf   Datmode,0
+l_out1  bcf   Datmode,MD_EVRD
+l_out2  bcf   Datmode,MD_NEWFRM
     
 
     clrf  PCLATH
@@ -2202,7 +2168,7 @@ un2   bsf   EECON1,RD
     bcf   T3CON,TMR3ON  ;flash timer off
     bcf   PIR2,TMR3IF
     bcf   PORTB,7
-un3   bcf   Datmode,5
+un3   bcf   Datmode,MD_EVULN
     call  wrack
     bra   l_out
         
@@ -2210,23 +2176,15 @@ un3   bcf   Datmode,5
   
 do    btfss Mode,1      ;in FLiM?
     bra   do2       ;no
-    btfss Datmode,3   ;ignore if not set up
+    btfss Datmode,MD_FLRUN    ;ignore if not set up
     bra   do1
-    btfsc Datmode,2   ;don't do if in setup   
+    btfsc Datmode,MD_NNWAIT   ;don't do if in setup   
     bra   do1
 do2   call  scan      ;scan inputs for change
     
                 
 do1   goto  main
-  
-  
-  
-    
-
-        
-    
-    
-    
+      
     
 ;***************************************************************************
 ;   main setup routine
@@ -2261,7 +2219,7 @@ setup clrf  INTCON      ;no interrupts yet
     clrf  EECON1      ;no accesses to program memory  
     clrf  Datmode
     clrf  Latcount
-    clrf  ECANCON     ;CAN mode 0 for now. 
+    clrf  ECANCON     ;CAN mode 0 for now   
      
     bsf   CANCON,7    ;CAN to config mode
     movlw B'00000011'   ;set CAN bit rate at 125000 for now
@@ -2283,9 +2241,7 @@ setup clrf  INTCON      ;no interrupts yet
     clrf  RXF1SIDL
     movlb 0       
 
-
-    
-mskload lfsr  0,RXM0SIDH    ;Clear masks, point to start
+mskload lfsr  FSR0,RXM0SIDH   ;Clear masks, point to start
 mskloop clrf  POSTINC0    
     movlw LOW RXM1EIDL+1    ;end of masks
     cpfseq  FSR0L
@@ -2306,7 +2262,7 @@ mskloop clrf  POSTINC0
     movwf T0CON     ;set T0 for LED flash
     movlw B'10000001'   ;Timer 1 control.16 bit write
     movwf T1CON     ;Timer 1 is for output duration
-    movlw 0x63
+    movlw HIGH TMR1CN   ;Set interrupt rate
     movwf TMR1H     ;set timer hi byte
 
     clrf  Tx1con
@@ -2345,14 +2301,13 @@ mskloop clrf  POSTINC0
     movf  PORTC,W     ;Read inputs
     xorwf WV_invt,W   ;invert as required
     movwf InputLast   ;initial input positions
-    movf  WV_push,W   ;Get push button toggle inputs
-    comf  WREG      ;Invert
-    andwf InputLast,W   ;Get inputs
-    movwf InputLast   ;and save
     movwf InpVal
     movwf Iin_curr
+    movwf InputX
     clrf  TogLast     ;Clear any toggle states
-    
+    clrf  InpChg
+    movlw SUDELY/LPINT
+    movwf SUtimer     ;Initialise startup timer
     ;   test for setup mode
     clrf  Mode
     movlw Modstat     ;get setup status
@@ -2374,7 +2329,7 @@ seten_f call  en_ram      ;put events in RAM
     movwf INTCON      ;enable interrupts
     bcf   PORTB,7
     bsf   PORTB,6     ;RUN LED on. (yellow for FLiM)
-    bcf   Datmode,0
+    bcf   Datmode,MD_NEWFRM
     goto  main
 
 slimset movlw B'00001111'   ;get DIP switch setting
@@ -2469,17 +2424,12 @@ putNN movff Rx0d1,NN_temph
     call  eewrite
     return  
 
-
-
-
-    
-
 newid1  movwf CanID_tmp   ;put in stored ID SLiM mode 
     call  shuffle
     movlw B'11110000'
-    andwf Tx1sidh
+    andwf Tx1sidh,F
     movf  IDtemph,W   ;set current ID into CAN buffer
-    iorwf Tx1sidh     ;leave priority bits alone
+    iorwf Tx1sidh,F   ;leave priority bits alone
     movf  IDtempl,W
     movwf Tx1sidl     ;only top three bits used
     movlb .15       ;put ID into TXB2 for enumeration response to RTR
@@ -2491,7 +2441,7 @@ new_1 btfsc TXB2CON,TXREQ ;wait till sent
     movf  IDtempl,W
     movwf TXB2SIDL
     movlw 0xB0
-    iorwf TXB2SIDH    ;set priority
+    iorwf TXB2SIDH,F    ;set priority
     clrf  TXB2DLC     ;no data, no RTR
     movlb 0
     return
@@ -2503,9 +2453,9 @@ newid_f   movlw LOW CANid     ;put in stored ID. FLiM mode
     movwf CanID_tmp     
     call  shuffle
     movlw B'11110000'
-    andwf Tx1sidh
+    andwf Tx1sidh,F
     movf  IDtemph,W   ;set current ID into CAN buffer
-    iorwf Tx1sidh     ;leave priority bits alone
+    iorwf Tx1sidh,F   ;leave priority bits alone
     movf  IDtempl,W
     movwf Tx1sidl     ;only top three bits used
     movlw LOW NodeID
@@ -2524,13 +2474,13 @@ newid_f   movlw LOW CANid     ;put in stored ID. FLiM mode
     movf  IDtempl,W
     movwf TXB2SIDL
     movlw 0xB0
-    iorwf TXB2SIDH    ;set priority
+    iorwf TXB2SIDH,F    ;set priority
     clrf  TXB2DLC     ;no data, no RTR
     movlb 0
 
     return
     
-nnack movlw 0x50      ;request frame for new NN or ack if not virgin
+nnack movlw OPC_RQNN    ;request frame for new NN or ack if not virgin
 nnrel movwf Tx1d0
     movff NN_temph,Tx1d1
     movff NN_templ,Tx1d2
@@ -2539,7 +2489,7 @@ nnrel movwf Tx1d0
     call  sendTX
     return
 
-wrack movlw 0x59
+wrack movlw OPC_WRACK
     bra   nnrel
 
     
@@ -2581,30 +2531,72 @@ shuffin movff Rx0sidl,IDtempl
 
 nvcopy  movlw LOW NVstart
     movwf EEADR
-    lfsr  FSR1,WV_ononly
-nvloop  bsf   EECON1,RD
-    movff EEDATA,POSTINC1
+    bsf   EECON1,RD
+    movf  EEDATA,W
+    movwf WV_ononly   ;Working Variable: Bitmapped "on-only" flags
     incf  EEADR
-    movlw LOW NVstart+NV_NUM
-    cpfseq  EEADR
-    bra   nvloop
 
+    bsf   EECON1,RD
+    movf  EEDATA,W
+    movwf WV_invt     ;Working Variable: Bitmapped Input invert flags
+    incf  EEADR
+
+    bsf   EECON1,RD
+    movf  EEDATA,W
+    movwf WV_dlyd     ;Working Variable: Bitmapped Delayed input flags
+    incf  EEADR
+
+    bsf   EECON1,RD
+    movf  EEDATA,W
+    movwf WV_ontm     ;Working Variable: On Time (MIN_TIME..255)
 ;We need to add 1 to the on/off times due to the way the timers count
-
     infsnz  WV_ontm     ;Adjust time, skip if NZ
     decf  WV_ontm     ;Keep at maximum
-
-    infsnz  WV_oftm     ;Adjust time, skip if NZ
-    decf  WV_oftm     ;Keep at maximum
-
-;check that the on & off delay isn't too short
-
     movlw MIN_TIME    ;Get minimum time 
     cpfsgt  WV_ontm     ;Skip if time OK
     movwf WV_ontm     ;Save minimum time
+    incf  EEADR
+
+    bsf   EECON1,RD
+    movf  EEDATA,W
+    movwf WV_oftm     ;Working Variable: Off Time (MIN_TIME..255)
+;We need to add 1 to the on/off times due to the way the timers count
+    infsnz  WV_oftm     ;Adjust time, skip if NZ
+    decf  WV_oftm     ;Keep at maximum
+    movlw MIN_TIME    ;Get minimum time 
     cpfsgt  WV_oftm     ;Skip if time OK
     movwf WV_oftm     ;Save minimum time
+    incf  EEADR
 
+    bsf   EECON1,RD
+    movf  EEDATA,W
+    movwf WV_pbtg     ;Working Variable: Bitmapped "Push Button Toggle Input" flags
+    incf  EEADR
+
+    bsf   EECON1,RD
+    movf  EEDATA,W
+    movwf WV_route    ;Working Variable: Bitmapped Input trigger Route event
+    incf  EEADR
+
+    bsf   EECON1,RD
+    movf  EEDATA,W
+    movwf WV_isod     ;Working Variable: Inhibit SOD for input
+    incf  EEADR
+
+    bsf   EECON1,RD
+    movf  EEDATA,W
+    movwf WV_mode     ;Working Variable: Expansion mode
+    incf  EEADR
+
+    clrf  Iin_count0    ;Clear counters
+    clrf  Iin_count1
+    clrf  Iin_count2
+    clrf  Iin_count3
+    clrf  Iin_count4
+    clrf  Iin_count5
+    clrf  Iin_count6
+    clrf  Iin_count7
+    clrf  IDcount
     return
 
 ;************************************************************************************
@@ -2644,47 +2636,77 @@ scan  movf  InputX,W    ;Get inputs to W
     xorwf InputLast,W   ;compare with last inputs
     bz    end_scan      ;nothing changed
     movwf InpChg        ;save changed bits
-    xorwf InputLast     ;update last bits
+    xorwf InputLast,F     ;update last bits
     
 ;***************************************************************
 ; If we've got here, one or more conditioned inputs have changed
 ; Updated inputs are in InputX, changed bits set in InpChg
 ; Check for any toggle modes
-;   InputX  InpChg  WV_push ->  InpVal  InpChg  TogLast
+;   InputX  InpChg  WV_pbtg ->  InpVal  InpChg  TogLast
 ;   x   x   0     InputX  Same  Same
 ;   0   0   1     TogLast Same  Same
 ;   0   1   1     TogLast Same  Toggle
 ;   1   0   1     TogLast Same  Same
 ;   1   1   1     TogLast 0   Same
 
-; TogLast ^= (~InputX & WV_push & InpChg)
+; TogLast ^= (~InputX & WV_pbtg & InpChg)
     movf  InputX,W
     comf  WREG
-    andwf WV_push,W
+    andwf WV_pbtg,W
     andwf InpChg,W
-    xorwf TogLast
+    xorwf TogLast,F
     
-; InpChg &= ~(InputX & WV_push & InpChg)
+; InpChg &= ~(InputX & WV_pbtg & InpChg)
     movf  InputX,W
-    andwf WV_push,W
+    andwf WV_pbtg,W
     andwf InpChg,W
     comf  WREG
-    andwf InpChg
+    andwf InpChg,F
 
-; InpVal = (~TogLast & WV_push)
+; InpVal = (~TogLast & WV_pbtg)
     movf  TogLast,W
     comf  WREG
-    andwf WV_push,W
+    andwf WV_pbtg,W
     movwf InpVal
   
-; InpVal |= (InputX & ~WV_push)
-    movf  WV_push,W
+; InpVal |= (InputX & ~WV_pbtg)
+    movf  WV_pbtg,W
     comf  WREG
     andwf InputX,W
-    iorwf InpVal
+    iorwf InpVal,F
+    
+; In startup period?
+    movf  SUtimer,W ;get startup timer
+    bnz   end_scan  ;Still starting, ignore
 
+; Do Route?
+    movf  WV_route,W  ;get trigger flag
+    bz    NoRoute   ;none so skip
+    movlw OPC_ACON  ;on event opcode
+    movwf Tx1d0   ;set up ready
+    incf  WV_route,W  ;test for 0xFF
+    bz    RouteAll  ;yes, do route always
+    andwf InpChg,W  ;has trigger changed
+    bz    NoRoute   ;no, so skip
+    andwf InputX,W  ;on or off?
+    bz    RouteAll  ;on, so don't -
+    incf  Tx1d0   ;inc opcode for off
+RouteAll
+    movf  InputX,w  ;get conditioned inputs
+    movwf Tx1d4   ;save as ENLo
+    movlw .2      ;triggered Route always 2
+    movwf Tx1d3   ;for ENHi
+    movff NN_temph,Tx1d1
+    movff NN_templ,Tx1d2
+    movlw   5
+    movwf Dlc
+    movlw .10
+    movwf Latcount
+    call  sendTX    ;send frame
+    call  dely
+NoRoute
+    
 ; Now process code as normal
-
     clrf  Incount
     clrf  Inbit
     bsf   Inbit,0     ;rolling bit
@@ -2711,7 +2733,7 @@ this3 call  ev_match    ;is it a device numbered switch?
     bz    dn_out      ;yes so send as short event with DN
     movff Incount,Tx1d4 ;EN number lo byte
     incf  Tx1d4     ;ENs start at 1
-    movlw B'10010000'   ;Command byte (temp for now = 90h)
+    movlw OPC_ACON    ;Command byte
     movwf Tx1d0     ;set up event
     
     movf  InpVal,W
@@ -2729,7 +2751,7 @@ this4 movff NN_temph,Tx1d1
     movlw B'00001111'   ;clear old priority
     andwf Tx1sidh,F
     movlw B'10110000'
-    iorwf Tx1sidh     ;low priority
+    iorwf Tx1sidh,F   ;low priority
     movlw .10
     movwf Latcount
     call  sendTX      ;send frame
@@ -2759,7 +2781,7 @@ dn_out  movlw LOW ENstart
     incf  EEADR
     call  eeread
     movwf Tx1d4
-    movlw 0x98      ;set to ON
+    movlw OPC_ASON    ;set to ON
     movwf Tx1d0
     movf  InpVal,W
     andwf Inbit,W     ;what is the new state
@@ -2909,17 +2931,25 @@ ev_mat1   call  eeread
 got_ev    retlw 0
     
 ;********************************************************************
-;   Do an event.  arrives with EV in EVtemp and EVtemp2
+;Process event opcodes OPC_ACON/OPC_ACOF/OPC_ASON/OPC_ASOF/OPC_AREQ/OPC_ASRQ
+;Arrives with opcode in Rx0d0 and event details in EVtemp and EVtemp2
 
-ev_set  movlw 0     ;what is EV?
+ev_set
+    btfsc EVtemp,3  ;Is it an input event?
+    bra   ss_in   ;Yes, process
+    movlw OPC_ACOF  ;Was it an OFF command?
+    subwf Rx0d0,W
+    bz    ev_setx   ;Ignore
+    movlw OPC_ASOF  ;Was it an OFF command?
+    subwf Rx0d0,W
+    bz    ev_setx   ;Ignore
+    movlw 0     ;what is EV?
     subwf EVtemp,W
     bz    state_seq ;send state sequence if EV = 0
     movlw 1
     subwf EVtemp,W
     bz    route_x   ;send event to set route
-    btfss EVtemp,3  ;is it a single input state request?
-    return        ;no more yet
-    bra   ss_in
+ev_setx return        ;no more yet
 
 route_x   goto  route ;branch was too long
 
@@ -2930,19 +2960,19 @@ state_seq
     movwf Dlc
     movf  Rx0d0,W
     movwf Cmdtemp
-    movlw CMD_REQ
+    movlw OPC_AREQ
     subwf Cmdtemp,W
     bz    s_seq1      ;a long request command   
-    movlw SCMD_REQ    ;is it a short request
+    movlw OPC_ASRQ    ;is it a short request
     subwf Cmdtemp,W
     bnz   s_seq3      ;not a request
-    movlw 0x90
+    movlw OPC_ACON
     movwf Cmdtemp
     bra   s_seq2
-s_seq1  movlw 0x93      ;ON response OPC
+s_seq1  movlw OPC_ARON    ;ON response OPC
     movwf Cmdtemp
     bra   s_seq2
-s_seq3  movlw 0x90      ;ON command OPC
+s_seq3  movlw OPC_ACON      ;ON command OPC
     movwf Cmdtemp
 s_seq2  movff Cmdtemp,Tx1d0 ;put in command byte
     clrf  Tx1d3
@@ -2956,12 +2986,18 @@ s_seq2  movff Cmdtemp,Tx1d0 ;put in command byte
     call  dn_sod      ;do a device numbered response
 s_seq4  incf  Incount     ;for next input
     
-    btfsc WV_push,0   ;Push button toggle input?
+    btfsc WV_isod,0   ;Inhibit SOD?
     bra   stog0     ;Don't send
-    call  sendTX
+    btfsc WV_pbtg,0   ;Push button toggle input?
+    bra   stog0     ;Don't send
+    btfss WV_ononly,0   ;Skip if on only
+    bra   stog0x
+    btfsc InpVal,0
+    bra   stog0
+stog0x  call  sendTX
     call  dely
-    clrf  Tx1d3
-stog0 movff Cmdtemp,Tx1d0
+stog0 clrf  Tx1d3
+    movff Cmdtemp,Tx1d0
   
     btfsc InpVal,1
     incf  Tx1d0,F     ;off
@@ -2973,12 +3009,18 @@ stog0 movff Cmdtemp,Tx1d0
     bnz   s_seq5      ;not a device numbered switch
     call  dn_sod      ;do a device numbered response
 s_seq5  incf  Incount     ;for next input
-    btfsc WV_push,1   ;Push button toggle input?
+    btfsc WV_isod,1   ;Inhibit SOD?
     bra   stog1     ;Don't send
-    call  sendTX
+    btfsc WV_pbtg,1   ;Push button toggle input?
+    bra   stog1     ;Don't send
+    btfss WV_ononly,1   ;Skip if on only
+    bra   stog1x
+    btfsc InpVal,1
+    bra   stog1
+stog1x  call  sendTX
     call  dely
-    clrf  Tx1d3
-stog1 movff Cmdtemp,Tx1d0
+stog1 clrf  Tx1d3
+    movff Cmdtemp,Tx1d0
     
     btfsc InpVal,2
     incf  Tx1d0,F     ;off
@@ -2989,12 +3031,18 @@ stog1 movff Cmdtemp,Tx1d0
     bnz   s_seq6      ;not a device numbered switch
     call  dn_sod      ;do a device numbered response
 s_seq6  incf  Incount     ;for next input
-    btfsc WV_push,2   ;Push button toggle input?
+    btfsc WV_isod,2   ;Inhibit SOD?
     bra   stog2     ;Don't send
-    call  sendTX
+    btfsc WV_pbtg,2   ;Push button toggle input?
+    bra   stog2     ;Don't send
+    btfss WV_ononly,2   ;Skip if on only
+    bra   stog2x
+    btfsc InpVal,2
+    bra   stog2
+stog2x  call  sendTX
     call  dely
-    clrf  Tx1d3
-stog2 movff Cmdtemp,Tx1d0
+stog2 clrf  Tx1d3
+    movff Cmdtemp,Tx1d0
   
     btfsc InpVal,3
     incf  Tx1d0,F     ;off
@@ -3005,12 +3053,18 @@ stog2 movff Cmdtemp,Tx1d0
     bnz   s_seq7      ;not a device numbered switch
     call  dn_sod      ;do a device numbered response
 s_seq7  incf  Incount     ;for next input
-    btfsc WV_push,3   ;Push button toggle input?
+    btfsc WV_isod,3   ;Inhibit SOD?
     bra   stog3     ;Don't send
-    call  sendTX
+    btfsc WV_pbtg,3   ;Push button toggle input?
+    bra   stog3     ;Don't send
+    btfss WV_ononly,3   ;Skip if on only
+    bra   stog3x
+    btfsc InpVal,3
+    bra   stog3
+stog3x  call  sendTX
     call  dely
-    clrf  Tx1d3
-stog3 movff Cmdtemp,Tx1d0
+stog3 clrf  Tx1d3
+    movff Cmdtemp,Tx1d0
   
     btfsc InpVal,4
     incf  Tx1d0,F     ;off
@@ -3021,12 +3075,18 @@ stog3 movff Cmdtemp,Tx1d0
     bnz   s_seq8      ;not a device numbered switch
     call  dn_sod      ;do a device numbered response
 s_seq8  incf  Incount     ;for next input
-    btfsc WV_push,4   ;Push button toggle input?
+    btfsc WV_isod,4   ;Inhibit SOD?
     bra   stog4     ;Don't send
-    call  sendTX
+    btfsc WV_pbtg,4   ;Push button toggle input?
+    bra   stog4     ;Don't send
+    btfss WV_ononly,4   ;Skip if on only
+    bra   stog4x
+    btfsc InpVal,4
+    bra   stog4
+stog4x  call  sendTX
     call  dely
-    clrf  Tx1d3
-stog4 movff Cmdtemp,Tx1d0
+stog4 clrf  Tx1d3
+    movff Cmdtemp,Tx1d0
   
     btfsc InpVal,5
     incf  Tx1d0,F     ;off
@@ -3037,12 +3097,18 @@ stog4 movff Cmdtemp,Tx1d0
     bnz   s_seq9      ;not a device numbered switch
     call  dn_sod      ;do a device numbered response
 s_seq9  incf  Incount     ;for next input
-    btfsc WV_push,5   ;Push button toggle input?
+    btfsc WV_isod,5   ;Inhibit SOD?
     bra   stog5     ;Don't send
-    call  sendTX
+    btfsc WV_pbtg,5   ;Push button toggle input?
+    bra   stog5     ;Don't send
+    btfss WV_ononly,5   ;Skip if on only
+    bra   stog5x
+    btfsc InpVal,5
+    bra   stog5
+stog5x  call  sendTX
     call  dely
-    clrf  Tx1d3
-stog5 movff Cmdtemp,Tx1d0
+stog5 clrf  Tx1d3
+    movff Cmdtemp,Tx1d0
   
     btfsc InpVal,6
     incf  Tx1d0,F     ;off
@@ -3053,12 +3119,18 @@ stog5 movff Cmdtemp,Tx1d0
     bnz   s_seq10     ;not a device numbered switch
     call  dn_sod      ;do a device numbered response
 s_seq10 incf  Incount     ;for next input
-    btfsc WV_push,6   ;Push button toggle input?
+    btfsc WV_isod,6   ;Inhibit SOD?
     bra   stog6     ;Don't send
-    call  sendTX
+    btfsc WV_pbtg,6   ;Push button toggle input?
+    bra   stog6     ;Don't send
+    btfss WV_ononly,6   ;Skip if on only
+    bra   stog6x
+    btfsc InpVal,6
+    bra   stog6
+stog6x  call  sendTX
     call  dely
-    clrf  Tx1d3
-stog6 movff Cmdtemp,Tx1d0
+stog6 clrf  Tx1d3
+    movff Cmdtemp,Tx1d0
   
     btfsc InpVal,7
     incf  Tx1d0,F     ;off
@@ -3069,34 +3141,40 @@ stog6 movff Cmdtemp,Tx1d0
     bnz   s_seq11     ;not a device numbered switch
     call  dn_sod      ;do a device numbered response
 s_seq11
-    btfsc WV_push,7   ;Push button toggle input?
+    btfsc WV_isod,7   ;Inhibit SOD?
     bra   stog7     ;Don't send
-    call  sendTX      ;last input
+    btfsc WV_pbtg,7   ;Push button toggle input?
+    bra   stog7     ;Don't send
+    btfss WV_ononly,7   ;Skip if on only
+    bra   stog7x
+    btfsc InpVal,7
+    bra   stog7
+stog7x  call  sendTX      ;last input
 stog7 clrf  TogLast     ;Reset toggle states
     return
     
 route movf  Rx0d0,W
     movwf Cmdtemp
-    movlw CMD_ON
+    movlw OPC_ACON
     subwf Cmdtemp,W ;is it an ON?
     bz    route1
-    movlw SCMD_ON
+    movlw OPC_ASON
     subwf Cmdtemp,W
     bnz   route4
-    movlw 0x90
+    movlw OPC_ACON
     movwf Cmdtemp
     bra   route1
-route4  movlw CMD_REQ   ;is it a long request?
+route4  movlw OPC_AREQ    ;is it a long request?
     subwf Cmdtemp,W
     bnz   route2
-    movlw 0x93    ;long response
+    movlw OPC_ARON    ;long response
     movwf Cmdtemp
     bra   route1
-route2  movlw SCMD_REQ
+route2  movlw OPC_ASRQ
     subwf Cmdtemp,W
     bz    route3
     goto  main2
-route3  movlw 0x93    ;long response to a short trigger event
+route3  movlw OPC_ARON    ;long response to a short trigger event
     movwf Cmdtemp
 route1  movff Cmdtemp,Tx1d0   ;put in CMD byte
     movlw 1
@@ -3109,10 +3187,56 @@ route1  movff Cmdtemp,Tx1d0   ;put in CMD byte
     bcf   Tx1d3,0
     return 
 
-ss_in movlw SCMD_REQ  ;only can poll bits with a short request
+; Process an incoming event for inputs 1..8
+; Rx0d0 bit 0 is 1 if ON, 0 if OFF
+; EVtemp contains input number in low three bits
+
+ss_in movlw OPC_ASRQ  ;only can poll bits with a short request
     subwf Rx0d0,W
     bz    ss_in3
+    movlw OPC_AREQ  ;Ignore
+    subwf Rx0d0,W
+    bz    ss_inx
+
+;Update push button state from incoming event
+
+    movlw 0x01
+    movwf EVtemp2   ;Save bitmask
+    movf  EVtemp,W  ;Get switch number
+    andlw 0x07    ;Mask out unwanted stuff
+    bz    do_sw   ;Switch 1
+    rlncf EVtemp2   ;Next bitmask
+    decf  WREG,w    ;Check
+    bz    do_sw   ;Switch 2
+    rlncf EVtemp2   ;Next bitmask
+    decf  WREG,w    ;Check
+    bz    do_sw   ;Switch 3
+    rlncf EVtemp2   ;Next bitmask
+    decf  WREG,w    ;Check
+    bz    do_sw   ;Switch 4
+    rlncf EVtemp2   ;Next bitmask
+    decf  WREG,w    ;Check
+    bz    do_sw   ;Switch 5
+    rlncf EVtemp2   ;Next bitmask
+    decf  WREG,w    ;Check
+    bz    do_sw   ;Switch 6
+    rlncf EVtemp2   ;Next bitmask
+    decf  WREG,w    ;Check
+    bz    do_sw   ;Switch 7
+    rlncf EVtemp2   ;Next bitmask
+do_sw btfsc Rx0d0,0   ;Skip if ON event
+    bra   do_sw0    ;if OFF event
+
+;Set switch state with bitmask in EVtemp2 to 1
+    movf  EVtemp2,W ;Get mask
+    iorwf TogLast,F ;Set bit
     return
+
+;Set switch state with bitmask in EVtemp2 to 0
+do_sw0  comf  EVtemp2,W ;Get inverted mask
+    andwf TogLast,F ;Clear bit
+ss_inx  return
+
 ss_in3  bcf   EVtemp,3  ;clear input flag bit
     movlw 1
     movwf In_roll   ;set for roll
@@ -3125,10 +3249,10 @@ ss_in1  movf  EVtemp,F
 get_in  movf  In_roll,W
     andwf Iin_curr,W
     bz    ss_low
-    movlw 0x9E
+    movlw OPC_ARSOF
     movwf Tx1d0   ;an off state response
     bra   ss_in2
-ss_low  movlw 0x9D    ;an on state response
+ss_low  movlw OPC_ARSON ;an on state response
     movwf Tx1d0
 ss_in2  movff Rx0d3,Tx1d3 ;put device no in Tx buffer
     movff Rx0d4,Tx1d4
@@ -3146,7 +3270,7 @@ sendTXa movf  Dlc,W       ;get data length
     movlw B'00001111'   ;clear old priority
     andwf Tx1sidh,F
     movlw B'10110000'
-    iorwf Tx1sidh     ;low priority
+    iorwf Tx1sidh,F   ;low priority
     movlw .10
     movwf Latcount
     call  sendTX1     ;send frame
@@ -3163,7 +3287,6 @@ putNV movlw NV_NUM + 1    ;put new NV in EEPROM and the NV ram.
     addlw LOW NVstart
     movwf EEADR
     movf  Rx0d4,W
-    movwf WV_ononly
     call  eewrite 
     call  wrack
     return
@@ -3186,7 +3309,7 @@ getNV movlw NV_NUM + 1    ;get NV from EEPROM and send.
 getNV1  movff Rx0d3,Tx1d3   ;NV index
 getNV2  movff Rx0d1,Tx1d1
     movff Rx0d2,Tx1d2
-    movlw 0x97      ;NV answer
+    movlw OPC_NVANS   ;NV answer
     movwf Tx1d0
     movlw 5
     movwf Dlc
@@ -3313,7 +3436,7 @@ enloop1
     movwf Tx1d6
     incf  EEADR,F
     
-ensend  movlw 0xF2
+ensend  movlw OPC_ENRSP
     movwf Tx1d0   ;OPC
     movlw 8
     movwf Dlc
@@ -3364,7 +3487,7 @@ enrdi movlw LOW ENindex + 1
     movwf Tx1d6
     incf  Rx0d3
 enrdi1  movff Rx0d3,Tx1d7
-    movlw 0xF2
+    movlw OPC_ENRSP
     movwf Tx1d0
     movlw 8
     movwf Dlc
@@ -3380,7 +3503,7 @@ evns2 movlw LOW ENindex+1
     movwf EEADR
     call  eeread
     movwf Tx1d3
-    movlw 0x74
+    movlw OPC_NUMEV
     movwf Tx1d0
     movlw 4
     movwf Dlc
@@ -3418,7 +3541,7 @@ evsend  movf  Rx0d3,W   ;get event index
     movwf EEADR
     call  eeread
     movwf Tx1d5   ;put in EV value
-    movlw 0xB5
+    movlw OPC_NEVAL
     movwf Tx1d0
     movff Rx0d3,Tx1d3
     movff Rx0d4,Tx1d4
@@ -3435,7 +3558,7 @@ notEV movlw 6
 ;   send node parameter bytes (7 maximum)
 
 parasend  
-    movlw 0xEF
+    movlw OPC_PARAMS
     movwf Tx1d0
     movlw 8
     movwf TBLPTRH
@@ -3460,7 +3583,7 @@ para1 tblrd*+
 ;   send module name - 7 bytes
 
 namesend  
-    movlw 0xE2
+    movlw OPC_NAME
     movwf Tx1d0
     movlw LOW myName
     movwf TBLPTRL
@@ -3496,7 +3619,7 @@ para1rd movf  Rx0d3,w
     decf  Temp
     cpfslt  Temp
     bra   pidxerr
-    movlw 0x9B
+    movlw OPC_PARAN
     movwf Tx1d0
     movlw 7   ;FLAGS index in nodeprm
     cpfseq  Temp
@@ -3504,7 +3627,21 @@ para1rd movf  Rx0d3,w
     call  getflags
     movwf Tx1d4
     bra   addflags
-notFlags    
+notFlags  
+    movlw .14
+    cpfseq  Temp
+    bra   nxtparam
+    call  getId1
+    movwf Tx1d4
+    bra   addflags
+nxtparam
+    movlw .15
+    cpfseq  Temp
+    bra   paramrd
+    call  getId2
+    movwf Tx1d4
+    bra   addflags
+paramrd
     movlw LOW nodeprm
     movwf TBLPTRL
     movlw HIGH nodeprm
@@ -3523,7 +3660,7 @@ addflags
     return  
     
 numParams
-    movlw 0x9B
+    movlw OPC_PARAN
     movwf Tx1d0
     movlw PRMCOUNT
     movwf Tx1d4
@@ -3547,8 +3684,33 @@ getflags    ; create flags byte
     movf  Temp,w
     return
     
-;**********************************************************
+;***********************************************************
+;
+;getDevId returnd DEVID2 and DEVID1 in PRODH and PRODL
 
+getId1  call  getProdId
+    movf  PRODL,w
+    return
+  
+getId2  call  getProdId
+    movf  PRODH,w
+    return
+
+getProdId
+    movlw 0x3F
+    movwf TBLPTRU
+    movlw 0xFF
+    movwf TBLPTRH
+    movlw 0xFE
+    movwf TBLPTRL
+    bsf   EECON1, EEPGD
+    tblrd*+
+    movff TABLAT, PRODL
+    tblrd*
+    movff TABLAT, PRODH
+    return    
+
+;**********************************************************
 ; returns Node Number, Manufacturer Id, Module Id and Flags
 
 whoami
@@ -3567,7 +3729,6 @@ whoami
     return
         
 ;***********************************************************
-
 ; error message send
 
 errmsg  call  errsub
@@ -3578,22 +3739,26 @@ errmsg2 call  errsub
     goto  l_out1
 
 errsub  movwf Tx1d3   ;main eror message send. Error no. in WREG
-    movlw 0x6F
+    movlw OPC_CMDERR
     movwf Tx1d0
     movlw 4
     movwf Dlc
     call  sendTX
     return
-;**********************************************************************
 
+;**********************************************************************
 ;
+#if AUTOID
 ;   self enumeration as separate subroutine
+self_enA
+    bcf   Datmode,MD_IDCONF     ;clear calling flag
+#endif
 
 self_en movff FSR1L,Fsr_tmp1Le  ;save FSR1 just in case
     movff FSR1H,Fsr_tmp1He 
     movlw B'11000000'
     movwf INTCON      ;start interrupts if not already started
-    bsf   Datmode,1   ;set to 'setup' mode
+    bsf   Datmode,MD_SETUP    ;set to 'setup' mode
     clrf  Tx1con      ;CAN ID enumeration. Send RTR frame, start timer
     movlw .14
     movwf Count
@@ -3623,12 +3788,11 @@ clr_en
     call  sendTXa     ;send RTR frame
     clrf  Tx1dlc      ;prevent more RTR frames
 
-self_en1    btfss PIR2,TMR3IF   ;setup timer out?
+self_en1
+    btfss PIR2,TMR3IF   ;setup timer out?
     bra   self_en1      ;fast loop till timer out 
     bcf   T3CON,TMR3ON  ;timer off
     bcf   PIR2,TMR3IF   ;clear flag
-
-
     clrf  IDcount
     incf  IDcount,F     ;ID starts at 1
     clrf  Roll
@@ -3656,7 +3820,6 @@ here3 movlw LOW CANid   ;put new ID in EEPROM
     call  eewrite
     call  newid_f     ;put new ID in various buffers
 
-      
     movff Fsr_tmp1Le,FSR1L  ;
     movff Fsr_tmp1He,FSR1H 
     return
@@ -3712,13 +3875,13 @@ EVstart de  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0   ;allows for 2 EVs per event.
 
 
 NVstart de  0,0       ;On Event Mask/Input Invert Mask
-    ifdef CANTOTI
+    #ifdef CANTOTI
     de  B'11111111',.10 ;CANTOTI Delayed Input Mask/On time (100mS)
     de  .50,0     ;CANTOTI Off time (500mS)/Push Button Toggle Input
-    else
+    #else
     de  B'00000000',.10 ;CANACE8C Delayed Input Mask/On time (100mS)
     de  .10,0     ;CANACE8C Off time (100mS)/Push Button Toggle Input
-    endif
+    #endif
     de  0,0       ;Expanded Mode (currently unused)
     de  0,0,0,0,0,0,0,0 ;Up to 16 NVs here if wanted
     
