@@ -1,16 +1,16 @@
     TITLE   "Source for CANACE8C/CANTOTI/CANMIO node for CBUS"
 
 MAJOR_VER   equ .2      ;Firmware major version (numeric)
-MINOR_VER   equ "p"     ;Firmware minor version (alpha)
-BETA_VER    equ .3    ;Firmware beta version (numeric, 0 = Release)
+MINOR_VER   equ "q"     ;Firmware minor version (alpha)
+BETA_VER    equ .1    ;Firmware beta version (numeric, 0 = Release)
 AUTOID      equ .0      ;Include automatic CAN ID enumeration (this may cause problems with CANCAN)
 
 ;Define CANTOTI for a TOTI module
-;Define CANMIO for CANMIO hardware
+;Define CANACE8MIO for CANMIO hardware
 
 ; Date    Rev   By  Notes
-;  9-Dec-16 v2p3  PJW Fix oddities with missing ONONLY events with fast changing inputs
-;  5-Dec-16 v2p2  PJW Removed potential interrupt race condition
+; 07-Aug-15 V2q2    PNB Update to use cbusdefs8j and support SLiM on CANMIO hardware
+; 12-May-15 v2q1    PNB Add additional 8 (non configurable) inputs on CANMIO expansion connector when in FLiM
 ; 25-Sep-14 v2p1  PJW Fixed a few minor bugs with Route logic
 ; 20-Sep-14     PJW Rewritten output routines to correct ONONLY oddities
 ; 17-Jun-14 v2n   PJW v2n release
@@ -194,12 +194,13 @@ AUTOID      equ .0      ;Include automatic CAN ID enumeration (this may cause pr
 
   include   "p18f2480.inc"
   include   "cbuslib/cbusdefs.inc"
+  include   "cbuslib/mioSLiM.inc"
 
   ;definitions  Change these to suit hardware.
   
 ; Define module type code and name string for hardware and firmware variations
 
-        ifdef   CANMIO      ;CANMIO hardware
+        ifdef   CANACE8MIO    ;CANMIO hardware
 S_PORT  equ PORTA       ;Setup Switch Port
 S_BIT equ 2         ;Setup Switch Bit
 MODULE_ID   equ MTYP_CANACE8MIO
@@ -239,6 +240,11 @@ NODEFLGS    equ PF_COMBI + PF_BOOT
 CPU_TYPE    equ P18F2480
 
 Modstat equ 1   ;address in EEPROM
+
+; Modstat bit usages
+
+;   0 - FLiM mode
+
 
 ;Self enumeration bits stored in Datmode
 MD_NEWFRM equ 0 ;new frame received
@@ -367,8 +373,7 @@ MD_IDCONF equ 7 ;ID conflict detected
 
   Temp    ;temps
   Temp1
-  InputInt  ;Input from interrupt routine
-  InpScan   ;Current inputs for scan
+  InputX    ;Input from interrupt routine (0=Active)
   TogLast   ;Last toggle state
   InpVal    ;Logical Input State (0=Active)
   InpChg    ;Changed inputs
@@ -465,6 +470,14 @@ MD_IDCONF equ 7 ;ID conflict detected
   WV_isod   ;Working Variable: Inhibit SOD for input
   WV_mode   ;Working Variable: Expanded Mode (for future use)
 
+; Variables for additional 8 inputs on CANMIO hardware
+
+    inputs      ;Status of additional inputs
+    dbinputs    ;Status of inputs during debounce
+    rawinps     ;Raw inputs just read in
+    dbcount     ;Debounce counter
+    Op_fb       ;Feedback input number for SOD
+
 ;lpint variables
   Iin_curr      ;Current inputs
   Iin_delta     ;Last delta
@@ -507,7 +520,7 @@ MD_IDCONF equ 7 ;ID conflict detected
 ;_STARTUPCODE 0x00
   ORG 0x0000
 ; *****************************************************************************
-  bra _CANInit
+    bra _CANInit
   bra _StartWrite
 ; ***************************************************************************** 
 ;_INTV_H CODE 0x08
@@ -1129,7 +1142,11 @@ cksum   dw  PRCKSUM     ; Checksum of parameters
 ;*******************************************************************
 
     ORG   0840h     ;start of program
-; 
+;
+#ifdef   CANACE8MIO
+        #include "cbuslib/canmio.asm" ; Subroutines for additional inputs and CANMIO SLiM
+#endif
+
 ;
 ;   high priority interrupt. Used for CAN receive and transmit error.
 
@@ -1144,12 +1161,13 @@ hpint movff CANCON,TempCANCON
     movff FSR1L,Fsr_temp1L    ;save FSR1
     movff FSR1H,Fsr_temp1H
     
-    movlw 8     ;for relocated code
+;   movlw 8     ;for relocated code
+        movlw   HIGH (cstatab)
     movwf PCLATH
     movf  TempCANSTAT,W     ;Jump table
   
     andlw B'00001110'
-    addwf PCL,F     ;jump
+cstatab addwf PCL,F     ;jump
     bra   back
     bra   errint      ;error interrupt
     bra   back
@@ -1292,7 +1310,7 @@ enum_3  movf  Roll,W
 ;**************************************************************
 ; low priority interrupt, called every 10mS
 ; This scans and conditions the inputs, storing the conditioned
-; inputs in InputInt for the foreground routine to send as CBUS events
+; inputs in InputX for the foreground routine to send as CBUS events
 
 lpint movwf W_tempL       ;Save registers
     movff STATUS,St_tempL
@@ -1418,72 +1436,72 @@ lpchk0  movf  Iin_count0,W    ;Get counter
     decfsz  Iin_count0      ;Decrement counter, skip if zero
     bra   lpchk1        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputInt,0
+    bcf   InputX,0
     btfsc Iin_curr,0      ;Skip if input inactive
-    bsf   InputInt,0
+    bsf   InputX,0
     
 lpchk1  movf  Iin_count1,W    ;Get counter
     bz    lpchk2        ;Zero, nothing to do
     decfsz  Iin_count1      ;Decrement counter, skip if zero
     bra   lpchk2        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputInt,1
+    bcf   InputX,1
     btfsc Iin_curr,1      ;Skip if input inactive
-    bsf   InputInt,1
+    bsf   InputX,1
       
 lpchk2  movf  Iin_count2,W    ;Get counter
     bz    lpchk3        ;Zero, nothing to do
     decfsz  Iin_count2      ;Decrement counter, skip if zero
     bra   lpchk3        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputInt,2
+    bcf   InputX,2
     btfsc Iin_curr,2      ;Skip if input inactive
-    bsf   InputInt,2
+    bsf   InputX,2
       
 lpchk3  movf  Iin_count3,W    ;Get counter
     bz    lpchk4        ;Zero, nothing to do
     decfsz  Iin_count3      ;Decrement counter, skip if zero
     bra   lpchk4        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputInt,3
+    bcf   InputX,3
     btfsc Iin_curr,3      ;Skip if input inactive
-    bsf   InputInt,3
+    bsf   InputX,3
       
 lpchk4  movf  Iin_count4,W    ;Get counter
     bz    lpchk5        ;Zero, nothing to do
     decfsz  Iin_count4      ;Decrement counter, skip if zero
     bra   lpchk5        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputInt,4
+    bcf   InputX,4
     btfsc Iin_curr,4      ;Skip if input inactive
-    bsf   InputInt,4
+    bsf   InputX,4
       
 lpchk5  movf  Iin_count5,W    ;Get counter
     bz    lpchk6        ;Zero, nothing to do
     decfsz  Iin_count5      ;Decrement counter, skip if zero
     bra   lpchk6        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputInt,5
+    bcf   InputX,5
     btfsc Iin_curr,5      ;Skip if input inactive
-    bsf   InputInt,5
+    bsf   InputX,5
       
 lpchk6  movf  Iin_count6,W    ;Get counter
     bz    lpchk7        ;Zero, nothing to do
     decfsz  Iin_count6      ;Decrement counter, skip if zero
     bra   lpchk7        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputInt,6
+    bcf   InputX,6
     btfsc Iin_curr,6      ;Skip if input inactive
-    bsf   InputInt,6
+    bsf   InputX,6
       
 lpchk7  movf  Iin_count7,W    ;Get counter
     bz    lpchk8        ;Zero, nothing to do
     decfsz  Iin_count7      ;Decrement counter, skip if zero
     bra   lpchk8        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputInt,7
+    bcf   InputX,7
     btfsc Iin_curr,7      ;Skip if input inactive
-    bsf   InputInt,7
+    bsf   InputX,7
       
 lpchk8
 
@@ -1655,7 +1673,10 @@ go_FLiM bsf   Datmode,MD_SETUP    ;FLiM setup mode
     
 ; common to FLiM and SLiM   
 
-main1 
+main1
+#ifdef  CANACE8MIO
+        call    chkinp          ; Check for any changes on the additional inputs
+#endif
     btfsc Datmode,MD_NEWFRM   ;any new CAN frame received?
     bra   packet      ;yes
     bra   do        ;look for inputs
@@ -2309,9 +2330,7 @@ mskloop clrf  POSTINC0
     movwf InputLast   ;initial input positions
     movwf InpVal
     movwf Iin_curr
-    movwf Iin_delta
-    movwf InpScan
-    movwf InputInt
+    movwf InputX
     clrf  TogLast     ;Clear any toggle states
     clrf  InpChg
     movlw SUDELY/LPINT
@@ -2322,10 +2341,9 @@ mskloop clrf  POSTINC0
     movwf EEADR
     call  eeread
     movwf Datmode
-    sublw 0       ;is SLiM mode
-    bnz   setid
-    bra   slimset     ;set up in SLiM mode
-  
+    btfss Datmode,0       ;is SLiM mode?
+    bra   slimset     ;No, set up in SLiM mode
+                                ;Yes, set up id etc
     
 setid bsf   Mode,1      ;flag FLiM
     call  newid_f     ;put ID into Tx1buf, TXB2 and ID number store
@@ -2340,7 +2358,12 @@ seten_f call  en_ram      ;put events in RAM
     bcf   Datmode,MD_NEWFRM
     goto  main
 
-slimset movlw B'00001111'   ;get DIP switch setting
+slimset
+
+#ifdef CANACE8MIO        
+        call    mioslimset
+#else
+        movlw B'00001111'   ;get DIP switch setting
     andwf PORTA,W
     movwf Temp
     movlw B'00010010'   ;get jumpers for high bits
@@ -2361,18 +2384,27 @@ slimset movlw B'00001111'   ;get DIP switch setting
     btfss PORTB,5     ;is it ON only?
     bsf   Mode,0      ;flag ON only
     bcf   Mode,1      ;not FLiM
-  
+#endif  
     
-    call  newid1      ;put ID into Tx1buf, TXB2 and ID number store
+nwid    call  newid1      ;put ID into Tx1buf, TXB2 and ID number store
     
     ;test for clear all events
+#ifdef  CANACE8MIO
+        movlw   MIO_SLIM_MASK
+        andwf   PORTA,w         ; Get learn switch bits
+        sublw   MIOERASE        ; Erase mode set?
+        bnz     seten           ; No, continue
+#else
     btfss PORTA,LEARN   ;ignore the clear if learn is set
     goto  seten
     btfss PORTA,UNLEARN
+#endif
     call  enclear     ;clear all events if unlearn is set during power up
 seten call  en_ram      ;put events in RAM
-  
-  
+
+#ifdef  CANACE8MIO
+        call    inpset          ; Setup variables for addtional inputs
+#endif
     movlw B'11000000'
     movwf INTCON      ;enable interrupts
     bcf   PORTB,6
@@ -2419,12 +2451,12 @@ tx1done movlb 0       ;bank 0
 
 putNN movff Rx0d1,NN_temph
     movff Rx0d2,NN_templ
-    movlw LOW NodeID
+putNNt  movlw LOW NodeID      ; Entry point with NN already in NN_temp
     movwf EEADR
-    movf  Rx0d1,W
+    movf  NN_temph,W
     call  eewrite
     incf  EEADR
-    movf  Rx0d2,W
+    movf  NN_templ,W
     call  eewrite
     movlw Modstat
     movwf EEADR
@@ -2637,39 +2669,35 @@ eetest  btfsc EECON1,WR
     return  
     
 ;***************************************************************
-; InputInt is the conditioned inputs set by the 10mS timer interrupt
-; Copy to InpScan and generate appropriate events for CBUS on any changes
+; InputX is the conditioned inputs set by the 10mS timer interrupt
+; Generate appropriate events for CBUS on any changes
 
-scan  movff INTCON,TempINTCON ;Save interrupt state
-    clrf  INTCON        ;disable interrupts
-    movff InputInt,InpScan  ;Copy current state
-    movff TempINTCON,INTCON ;reenable interrupts
-    movf  InpScan,W     ;Get inputs to W
-    xorwf InputLast,W     ;compare with last inputs
+scan  movf  InputX,W    ;Get inputs to W
+    xorwf InputLast,W   ;compare with last inputs
     bz    end_scan      ;nothing changed
     movwf InpChg        ;save changed bits
     xorwf InputLast,F     ;update last bits
     
 ;***************************************************************
 ; If we've got here, one or more conditioned inputs have changed
-; Updated inputs are in InpScan, changed bits set in InpChg
+; Updated inputs are in InputX, changed bits set in InpChg
 ; Check for any toggle modes
-;   InpScan InpChg  WV_pbtg ->  InpVal  InpChg  TogLast
-;   x   x   0     InpScan Same  Same
+;   InputX  InpChg  WV_pbtg ->  InpVal  InpChg  TogLast
+;   x   x   0     InputX  Same  Same
 ;   0   0   1     TogLast Same  Same
 ;   0   1   1     TogLast Same  Toggle
 ;   1   0   1     TogLast Same  Same
 ;   1   1   1     TogLast 0   Same
 
-; TogLast ^= (~InpScan & WV_pbtg & InpChg)
-    movf  InpScan,W
+; TogLast ^= (~InputX & WV_pbtg & InpChg)
+    movf  InputX,W
     comf  WREG
     andwf WV_pbtg,W
     andwf InpChg,W
     xorwf TogLast,F
     
-; InpChg &= ~(InpScan & WV_pbtg & InpChg)
-    movf  InpScan,W
+; InpChg &= ~(InputX & WV_pbtg & InpChg)
+    movf  InputX,W
     andwf WV_pbtg,W
     andwf InpChg,W
     comf  WREG
@@ -2681,10 +2709,10 @@ scan  movff INTCON,TempINTCON ;Save interrupt state
     andwf WV_pbtg,W
     movwf InpVal
   
-; InpVal |= (InpScan & ~WV_pbtg)
+; InpVal |= (InputX & ~WV_pbtg)
     movf  WV_pbtg,W
     comf  WREG
-    andwf InpScan,W
+    andwf InputX,W
     iorwf InpVal,F
     
 ; In startup period?
@@ -2705,7 +2733,7 @@ scan  movff INTCON,TempINTCON ;Save interrupt state
     bz    RouteAll  ;on, so don't -
     incf  Tx1d0   ;inc opcode for off
 RouteAll
-    movf  InpScan,w ;get conditioned inputs
+    movf  InputX,w  ;get conditioned inputs
     movwf Tx1d4   ;save as ENLo
     movlw .2      ;triggered Route always 2
     movwf Tx1d3   ;for ENHi
@@ -3157,6 +3185,13 @@ s_seq11
     bra   stog7
 stog7x  call  sendTX      ;last input
 stog7 clrf  TogLast     ;Reset toggle states
+
+;   Do SOD response for additional inputs on CANMIO
+
+#ifdef  CANACE8MIO
+        call    xtrasod
+#endif
+
     return
     
 route movf  Rx0d0,W
