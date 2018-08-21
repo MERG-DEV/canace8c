@@ -1,14 +1,16 @@
     TITLE   "Source for CANACE8C/CANTOTI/CANMIO node for CBUS"
 
 MAJOR_VER   equ .2      ;Firmware major version (numeric)
-MINOR_VER   equ "n"     ;Firmware minor version (alpha)
-BETA_VER    equ .0    ;Firmware beta version (numeric, 0 = Release)
+MINOR_VER   equ "p"     ;Firmware minor version (alpha)
+BETA_VER    equ .1    ;Firmware beta version (numeric, 0 = Release)
 AUTOID      equ .0      ;Include automatic CAN ID enumeration (this may cause problems with CANCAN)
 
 ;Define CANTOTI for a TOTI module
 ;Define CANMIO for CANMIO hardware
 
 ; Date    Rev   By  Notes
+; 25-Sep-14 v2p1  PJW Fixed a few minor bugs with Route logic
+; 20-Sep-14     PJW Rewritten output routines to correct ONONLY oddities
 ; 17-Jun-14 v2n   PJW v2n release
 ; 10-Jun-14 v2n11 PJW Input specific SOD inhibit now coded for new FCU.
 ;           Also returns physical PIC in node properties
@@ -365,10 +367,11 @@ MD_IDCONF equ 7 ;ID conflict detected
   Temp1
   InputX    ;Input from interrupt routine (0=Active)
   TogLast   ;Last toggle state
-  InpVal    ;Logical Input State
+  InpVal    ;Logical Input State (0=Active)
   InpChg    ;Changed inputs
   Inbit
   Incount
+  InOnOnly
   InputLast
   Atemp   ;port a temp value
   Dlc     ;data length
@@ -2686,9 +2689,10 @@ scan  movf  InputX,W    ;Get inputs to W
     movwf Tx1d0   ;set up ready
     incf  WV_route,W  ;test for 0xFF
     bz    RouteAll  ;yes, do route always
+    movf  WV_route,W  ;get trigger flag
     andwf InpChg,W  ;has trigger changed
     bz    NoRoute   ;no, so skip
-    andwf InputX,W  ;on or off?
+    andwf InpVal,W  ;on or off?
     bz    RouteAll  ;on, so don't -
     incf  Tx1d0   ;inc opcode for off
 RouteAll
@@ -2710,6 +2714,16 @@ NoRoute
     clrf  Incount
     clrf  Inbit
     bsf   Inbit,0     ;rolling bit
+    btfss Mode,2      ;mods by Brian W
+    call  nvcopy      ;Copy NV's to RAM
+    bsf   Mode,2    
+    movff WV_ononly,InOnOnly;Copy on-only bits
+    btfsc Mode,1      ;skip if SLIM
+    bra   change1
+    clrf  InOnOnly    ;clear ononly bits
+    btfsc Mode,0      ;Skip if SLIM OnOff
+    comf  InOnOnly,F    ;Invert
+; Now InOnOnly contains bits set for each OnOnly input, SLiM or FLiM 
 change1 bcf   STATUS,C
     rrcf  InpChg,F
     bc    this
@@ -2717,33 +2731,29 @@ change1 bcf   STATUS,C
     rlcf  Inbit,F     ;added by Roger
     bc    end_scan
     bra   change1
-this  btfss Mode,1      ;is it FLiM?
-    bra   this3     ;no
-    bcf   Mode,0      ;clear ON only bit
-    btfsc Mode,2      ;mods by Brian W
-    bra   bri1
-    call  nvcopy      ;Copy NV's to RAM
-    bsf   Mode,2    
-bri1  movf  Inbit,W
-    andwf WV_ononly,W   ;check if ononly NV bit is set
-    bz    this3     ;no so leave Mode alone
-    bsf   Mode,0      ;yes so set for no OFF
-this3 call  ev_match    ;is it a device numbered switch?
+
+this  movf  Inbit,W
+    call  ev_match    ;is it a device numbered switch?
     sublw 0
     bz    dn_out      ;yes so send as short event with DN
     movff Incount,Tx1d4 ;EN number lo byte
     incf  Tx1d4     ;ENs start at 1
+    clrf  Tx1d3
     movlw OPC_ACON    ;Command byte
-    movwf Tx1d0     ;set up event
-    
+this1 movwf Tx1d0     ;set up event
     movf  InpVal,W
     andwf Inbit,W     ;what is the new state
-    bz    this0     ;is a 0
-    btfsc Mode,0      ;what mode?
-    bra   change1     ;if mode 1, then don't send an OFF
+    bz    this2     ;always send a 1
+    movf  InOnOnly,W
+    andwf Inbit,W     ;what is the new state
+#if 1
+    bnz   this3     ;this is non-ideal, but helps to stop
+                ;occasional misreads of fast changing OnOnly inputs
+#else
+    bnz   change1     ;if OnOnly, then don't send an OFF
+#endif
     bsf   Tx1d0,0     ;set to a 1 (off state)
-this2 clrf  Tx1d3
-this4 movff NN_temph,Tx1d1
+this2 movff NN_temph,Tx1d1
     movff NN_templ,Tx1d2
     
     movlw   5
@@ -2755,19 +2765,11 @@ this4 movff NN_temph,Tx1d1
     movlw .10
     movwf Latcount
     call  sendTX      ;send frame
-    incf  Incount,F
+this3 incf  Incount,F
     rlcf  Inbit,F
     bc    end_scan
     call  dely
-    
     bra   change1
-end_scan
-    return
-    
-this0 bcf   Tx1d0,0     ;set to a 0 (on state)
-    bra   this2
-    nop
-    return
 
 dn_out  movlw LOW ENstart
     movwf EEADR
@@ -2781,16 +2783,11 @@ dn_out  movlw LOW ENstart
     incf  EEADR
     call  eeread
     movwf Tx1d4
-    movlw OPC_ASON    ;set to ON
-    movwf Tx1d0
-    movf  InpVal,W
-    andwf Inbit,W     ;what is the new state
-    bz    this4     ;is a 0
-    btfss Mode,0      ;on only?
-    bra   dn_out1
-    bra   change1
-dn_out1 bsf   Tx1d0,0     ;off
-    bra   this4
+    movlw OPC_ASON    ;set short event
+    bra   this1
+    
+end_scan
+    return
     
 
 ;*********************************************************
