@@ -2,13 +2,15 @@
 
 MAJOR_VER   equ .2      ;Firmware major version (numeric)
 MINOR_VER   equ "p"     ;Firmware minor version (alpha)
-BETA_VER    equ .1    ;Firmware beta version (numeric, 0 = Release)
+BETA_VER    equ .3    ;Firmware beta version (numeric, 0 = Release)
 AUTOID      equ .0      ;Include automatic CAN ID enumeration (this may cause problems with CANCAN)
 
 ;Define CANTOTI for a TOTI module
 ;Define CANMIO for CANMIO hardware
 
 ; Date    Rev   By  Notes
+;  9-Dec-16 v2p3  PJW Fix oddities with missing ONONLY events with fast changing inputs
+;  5-Dec-16 v2p2  PJW Removed potential interrupt race condition
 ; 25-Sep-14 v2p1  PJW Fixed a few minor bugs with Route logic
 ; 20-Sep-14     PJW Rewritten output routines to correct ONONLY oddities
 ; 17-Jun-14 v2n   PJW v2n release
@@ -365,7 +367,8 @@ MD_IDCONF equ 7 ;ID conflict detected
 
   Temp    ;temps
   Temp1
-  InputX    ;Input from interrupt routine (0=Active)
+  InputInt  ;Input from interrupt routine
+  InpScan   ;Current inputs for scan
   TogLast   ;Last toggle state
   InpVal    ;Logical Input State (0=Active)
   InpChg    ;Changed inputs
@@ -1289,7 +1292,7 @@ enum_3  movf  Roll,W
 ;**************************************************************
 ; low priority interrupt, called every 10mS
 ; This scans and conditions the inputs, storing the conditioned
-; inputs in InputX for the foreground routine to send as CBUS events
+; inputs in InputInt for the foreground routine to send as CBUS events
 
 lpint movwf W_tempL       ;Save registers
     movff STATUS,St_tempL
@@ -1415,72 +1418,72 @@ lpchk0  movf  Iin_count0,W    ;Get counter
     decfsz  Iin_count0      ;Decrement counter, skip if zero
     bra   lpchk1        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputX,0
+    bcf   InputInt,0
     btfsc Iin_curr,0      ;Skip if input inactive
-    bsf   InputX,0
+    bsf   InputInt,0
     
 lpchk1  movf  Iin_count1,W    ;Get counter
     bz    lpchk2        ;Zero, nothing to do
     decfsz  Iin_count1      ;Decrement counter, skip if zero
     bra   lpchk2        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputX,1
+    bcf   InputInt,1
     btfsc Iin_curr,1      ;Skip if input inactive
-    bsf   InputX,1
+    bsf   InputInt,1
       
 lpchk2  movf  Iin_count2,W    ;Get counter
     bz    lpchk3        ;Zero, nothing to do
     decfsz  Iin_count2      ;Decrement counter, skip if zero
     bra   lpchk3        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputX,2
+    bcf   InputInt,2
     btfsc Iin_curr,2      ;Skip if input inactive
-    bsf   InputX,2
+    bsf   InputInt,2
       
 lpchk3  movf  Iin_count3,W    ;Get counter
     bz    lpchk4        ;Zero, nothing to do
     decfsz  Iin_count3      ;Decrement counter, skip if zero
     bra   lpchk4        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputX,3
+    bcf   InputInt,3
     btfsc Iin_curr,3      ;Skip if input inactive
-    bsf   InputX,3
+    bsf   InputInt,3
       
 lpchk4  movf  Iin_count4,W    ;Get counter
     bz    lpchk5        ;Zero, nothing to do
     decfsz  Iin_count4      ;Decrement counter, skip if zero
     bra   lpchk5        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputX,4
+    bcf   InputInt,4
     btfsc Iin_curr,4      ;Skip if input inactive
-    bsf   InputX,4
+    bsf   InputInt,4
       
 lpchk5  movf  Iin_count5,W    ;Get counter
     bz    lpchk6        ;Zero, nothing to do
     decfsz  Iin_count5      ;Decrement counter, skip if zero
     bra   lpchk6        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputX,5
+    bcf   InputInt,5
     btfsc Iin_curr,5      ;Skip if input inactive
-    bsf   InputX,5
+    bsf   InputInt,5
       
 lpchk6  movf  Iin_count6,W    ;Get counter
     bz    lpchk7        ;Zero, nothing to do
     decfsz  Iin_count6      ;Decrement counter, skip if zero
     bra   lpchk7        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputX,6
+    bcf   InputInt,6
     btfsc Iin_curr,6      ;Skip if input inactive
-    bsf   InputX,6
+    bsf   InputInt,6
       
 lpchk7  movf  Iin_count7,W    ;Get counter
     bz    lpchk8        ;Zero, nothing to do
     decfsz  Iin_count7      ;Decrement counter, skip if zero
     bra   lpchk8        ;Still counting
     ;Input has now actually changed, update master store
-    bcf   InputX,7
+    bcf   InputInt,7
     btfsc Iin_curr,7      ;Skip if input inactive
-    bsf   InputX,7
+    bsf   InputInt,7
       
 lpchk8
 
@@ -2306,7 +2309,9 @@ mskloop clrf  POSTINC0
     movwf InputLast   ;initial input positions
     movwf InpVal
     movwf Iin_curr
-    movwf InputX
+    movwf Iin_delta
+    movwf InpScan
+    movwf InputInt
     clrf  TogLast     ;Clear any toggle states
     clrf  InpChg
     movlw SUDELY/LPINT
@@ -2632,35 +2637,39 @@ eetest  btfsc EECON1,WR
     return  
     
 ;***************************************************************
-; InputX is the conditioned inputs set by the 10mS timer interrupt
-; Generate appropriate events for CBUS on any changes
+; InputInt is the conditioned inputs set by the 10mS timer interrupt
+; Copy to InpScan and generate appropriate events for CBUS on any changes
 
-scan  movf  InputX,W    ;Get inputs to W
-    xorwf InputLast,W   ;compare with last inputs
+scan  movff INTCON,TempINTCON ;Save interrupt state
+    clrf  INTCON        ;disable interrupts
+    movff InputInt,InpScan  ;Copy current state
+    movff TempINTCON,INTCON ;reenable interrupts
+    movf  InpScan,W     ;Get inputs to W
+    xorwf InputLast,W     ;compare with last inputs
     bz    end_scan      ;nothing changed
     movwf InpChg        ;save changed bits
     xorwf InputLast,F     ;update last bits
     
 ;***************************************************************
 ; If we've got here, one or more conditioned inputs have changed
-; Updated inputs are in InputX, changed bits set in InpChg
+; Updated inputs are in InpScan, changed bits set in InpChg
 ; Check for any toggle modes
-;   InputX  InpChg  WV_pbtg ->  InpVal  InpChg  TogLast
-;   x   x   0     InputX  Same  Same
+;   InpScan InpChg  WV_pbtg ->  InpVal  InpChg  TogLast
+;   x   x   0     InpScan Same  Same
 ;   0   0   1     TogLast Same  Same
 ;   0   1   1     TogLast Same  Toggle
 ;   1   0   1     TogLast Same  Same
 ;   1   1   1     TogLast 0   Same
 
-; TogLast ^= (~InputX & WV_pbtg & InpChg)
-    movf  InputX,W
+; TogLast ^= (~InpScan & WV_pbtg & InpChg)
+    movf  InpScan,W
     comf  WREG
     andwf WV_pbtg,W
     andwf InpChg,W
     xorwf TogLast,F
     
-; InpChg &= ~(InputX & WV_pbtg & InpChg)
-    movf  InputX,W
+; InpChg &= ~(InpScan & WV_pbtg & InpChg)
+    movf  InpScan,W
     andwf WV_pbtg,W
     andwf InpChg,W
     comf  WREG
@@ -2672,10 +2681,10 @@ scan  movf  InputX,W    ;Get inputs to W
     andwf WV_pbtg,W
     movwf InpVal
   
-; InpVal |= (InputX & ~WV_pbtg)
+; InpVal |= (InpScan & ~WV_pbtg)
     movf  WV_pbtg,W
     comf  WREG
-    andwf InputX,W
+    andwf InpScan,W
     iorwf InpVal,F
     
 ; In startup period?
@@ -2696,7 +2705,7 @@ scan  movf  InputX,W    ;Get inputs to W
     bz    RouteAll  ;on, so don't -
     incf  Tx1d0   ;inc opcode for off
 RouteAll
-    movf  InputX,w  ;get conditioned inputs
+    movf  InpScan,w ;get conditioned inputs
     movwf Tx1d4   ;save as ENLo
     movlw .2      ;triggered Route always 2
     movwf Tx1d3   ;for ENHi
