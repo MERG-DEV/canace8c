@@ -1,13 +1,15 @@
-;     TITLE   "Source for ACE8C node for CBUS"
-; filename CANACE8C_v2j.asm 14/10/12
+;     TITLE   "Source for CANACE8C/CANTOTI node for CBUS"
+; filename CANACE8C_v2k.asm 25-Jul-13 PJW
 ; Uses 4 MHz resonator and PLL for 16 MHz clock
 ; This is an 8 input FLiM producer node with readout.
-; Has 8 switch / logic inputs with 100K pullups.
+; Has 8 switch / logic inputs with pullups.
 ; Uses a 6 way DIP switch to set base NN and CAN ID (unless set otherwise)and 
 ; for learning request events (learn + unlearn)
 ; Sends 8 ON / OFF events using the 32 bit EN protocol.
 ; Sends response event with the inputs as the LSbyte
-; Additional input control for inversion and delays
+; Additional input control for inversion, delays and push button input.
+
+; This source file can also generate CANTOTI code by defining 'CANTOTI'
 
 ; The setup timer is TMR3. This should not be used for anything else
 ; CAN bit rate of 125 Kbits/sec
@@ -18,7 +20,7 @@
 
 
 ; event command is 90h (on) and 91h (off) for now.
-; This code includes the  CAN ID enumeration readback (FLiM compatibility)
+; This code includes the CAN ID enumeration readback (FLiM compatibility)
 ; The NN and CAN ID are set by the 4 DIP switches. 
 
 ; working as just a producer as per CANACE8  02/12/07
@@ -161,9 +163,17 @@
 ; Rev v2j Added optional input inversion and input delay controls (Phil Wheeler)
 ;       Corrected event initialisation (Phil Wheeler)
 ;     Corrected firmware ID (Phil Wheeler)
+; Rev v2k 25-Jul13 Added optional push button toggle input mode (Phil Wheeler)
+;     Single source file now builds CANACE8C and CANTOTI firmware
+;     Requires FCU V1.4.7.9 or later to configure this mode.
+
+; Push Button Input Toggle Mode (added by Phil Wheeler, July 2013)
+; If enabled for an input, this allows a push button on the input to alternately generate
+; ON and OFF events. The first event after a SOD will be ON. A SOD will NOT send events
+; for toggle inputs, as this doesn't make sense. The push button toggle mode is processed
+; after any input inversion or delay settings.
 
 ;end of comments for ACE8C
-
 
 ; This is the bootloader section
 
@@ -260,11 +270,16 @@ MIN_TIME  equ 2     ;minimum time for input change (*10mS) + 1
 
 MAN_NO      equ MANU_MERG    ;manufacturer number
 MAJOR_VER   equ 2
-MINOR_VER   equ "J"
-MODULE_ID   equ MTYP_CANACE8C ; id to identify this type of module
-EVT_NUM     equ EN_NUM           ; Number of events
-EVperEVT    equ EV_NUM           ; Event variables per event
-NV_NUM      equ 6          ; Number of node variables
+MINOR_VER   equ "K"
+    ifdef CANTOTI
+MODULE_ID   equ MTYP_CANTOTI  ; id to identify a CANTOTI module
+    else
+MODULE_ID   equ MTYP_CANACE8C   ; id to identify a CANACE8C module
+    endif
+EVT_NUM     equ EN_NUM        ; Number of events
+EVperEVT    equ EV_NUM        ; Event variables per event
+
+NV_NUM      equ 7       ; Number of node variables
 NODEFLGS    equ PF_COMBI + PF_BOOT
 CPU_TYPE    equ P18F2480
 
@@ -395,11 +410,12 @@ Modstat equ 1   ;address in EEPROM
   NN_temph  ;node number in RAM
   NN_templ
   ;The WV_ variables MUST match the NV definitions and be in the same order
-  WV_ononly ;Working Variable: "on-only" flags
-  WV_invt   ;Working Variable: Input invert flags
-  WV_dlyd   ;Working Variable: Delayed input flags
+  WV_ononly ;Working Variable: Bitmapped "on-only" flags
+  WV_invt   ;Working Variable: Bitmapped Input invert flags
+  WV_dlyd   ;Working Variable: Bitmapped Delayed input flags
   WV_ontm   ;Working Variable: On Time (MIN_TIME..255)
   WV_oftm   ;Working Variable: Off Time (MIN_TIME..255)
+  WV_push   ;Working Variable: Bitmapped "Push Button Toggle Input" flags
   WV_mode   ;Working Variable: Expanded Mode
   
   IDcount   ;used in self allocation of CAN ID.
@@ -413,8 +429,9 @@ Modstat equ 1   ;address in EEPROM
   Temp    ;temps
   Temp1
   InputX    ;Input from interrupt routine (0=Active)
-  Intemp
-  Intemp1
+  TogLast   ;Last toggle state
+  InpVal    ;Logical Input State
+  InpChg    ;Changed inputs
   Inbit
   Incount
   InputLast
@@ -1130,7 +1147,11 @@ loadadr
     goto  hpint     ;high priority interrupt
     
     ORG   0810h     
-myName  db  "ACE8C  "   
+    ifdef CANTOTI
+myName  db  "TOTI   "   
+    else
+myName  db  "ACE8C  "
+    endif
     
     ORG   0818h 
     goto  lpint     ;low priority interrupt
@@ -2324,8 +2345,13 @@ mskloop clrf  POSTINC0
     movf  PORTC,W     ;Read inputs
     xorwf WV_invt,W   ;invert as required
     movwf InputLast   ;initial input positions
-    movwf InputX
+    movf  WV_push,W   ;Get push button toggle inputs
+    comf  WREG      ;Invert
+    andwf InputLast,W   ;Get inputs
+    movwf InputLast   ;and save
+    movwf InpVal
     movwf Iin_curr
+    clrf  TogLast     ;Clear any toggle states
     
     ;   test for setup mode
     clrf  Mode
@@ -2611,23 +2637,59 @@ eetest  btfsc EECON1,WR
     return  
     
 ;***************************************************************
-;InputX is the conditioned inputs set by the 10mS timer interrupt
-;Generate appropriate events for CBUS on any changes
+; InputX is the conditioned inputs set by the 10mS timer interrupt
+; Generate appropriate events for CBUS on any changes
 
 scan  movf  InputX,W    ;Get inputs to W
-    movwf Intemp      ;Save in temp
-    movf  Intemp,W    ; Why?
-    cpfseq  InputLast   ;any change?
-    bra   change
-    return
+    xorwf InputLast,W   ;compare with last inputs
+    bz    end_scan      ;nothing changed
+    movwf InpChg        ;save changed bits
+    xorwf InputLast     ;update last bits
+    
+;***************************************************************
+; If we've got here, one or more conditioned inputs have changed
+; Updated inputs are in InputX, changed bits set in InpChg
+; Check for any toggle modes
+;   InputX  InpChg  WV_push ->  InpVal  InpChg  TogLast
+;   x   x   0     InputX  Same  Same
+;   0   0   1     TogLast Same  Same
+;   0   1   1     TogLast Same  Toggle
+;   1   0   1     TogLast Same  Same
+;   1   1   1     TogLast 0   Same
 
-change  xorwf InputLast,W   ;which has changed
-    movwf Intemp1     ;hold it
+; TogLast ^= (~InputX & WV_push & InpChg)
+    movf  InputX,W
+    comf  WREG
+    andwf WV_push,W
+    andwf InpChg,W
+    xorwf TogLast
+    
+; InpChg &= ~(InputX & WV_push & InpChg)
+    movf  InputX,W
+    andwf WV_push,W
+    andwf InpChg,W
+    comf  WREG
+    andwf InpChg
+
+; InpVal = (~TogLast & WV_push)
+    movf  TogLast,W
+    comf  WREG
+    andwf WV_push,W
+    movwf InpVal
+  
+; InpVal |= (InputX & ~WV_push)
+    movf  WV_push,W
+    comf  WREG
+    andwf InputX,W
+    iorwf InpVal
+
+; Now process code as normal
+
     clrf  Incount
     clrf  Inbit
     bsf   Inbit,0     ;rolling bit
 change1 bcf   STATUS,C
-    rrcf  Intemp1,F
+    rrcf  InpChg,F
     bc    this
     incf  Incount,F
     rlcf  Inbit,F     ;added by Roger
@@ -2652,7 +2714,7 @@ this3 call  ev_match    ;is it a device numbered switch?
     movlw B'10010000'   ;Command byte (temp for now = 90h)
     movwf Tx1d0     ;set up event
     
-    movf  Intemp,W
+    movf  InpVal,W
     andwf Inbit,W     ;what is the new state
     bz    this0     ;is a 0
     btfsc Mode,0      ;what mode?
@@ -2677,7 +2739,7 @@ this4 movff NN_temph,Tx1d1
     call  dely
     
     bra   change1
-end_scan    movff Intemp,InputLast
+end_scan
     return
     
 this0 bcf   Tx1d0,0     ;set to a 0 (on state)
@@ -2699,7 +2761,7 @@ dn_out  movlw LOW ENstart
     movwf Tx1d4
     movlw 0x98      ;set to ON
     movwf Tx1d0
-    movf  Intemp,W
+    movf  InpVal,W
     andwf Inbit,W     ;what is the new state
     bz    this4     ;is a 0
     btfss Mode,0      ;on only?
@@ -2885,114 +2947,132 @@ s_seq3  movlw 0x90      ;ON command OPC
 s_seq2  movff Cmdtemp,Tx1d0 ;put in command byte
     clrf  Tx1d3
     movff Incount,Tx1d4
-    incf  Tx1d4   ;start at 1
-    btfsc InputX,0    ;test input state
+    incf  Tx1d4     ;start at 1
+    btfsc InpVal,0    ;test input state
     incf  Tx1d0,F     ;off
     call  ev_match
     movwf,W
-    bnz   s_seq4    ;not a device numbered switch
-    call  dn_sod    ;do a device numbered response
-s_seq4  incf  Incount   ;for next input
+    bnz   s_seq4      ;not a device numbered switch
+    call  dn_sod      ;do a device numbered response
+s_seq4  incf  Incount     ;for next input
     
+    btfsc WV_push,0   ;Push button toggle input?
+    bra   stog0     ;Don't send
     call  sendTX
     call  dely
     clrf  Tx1d3
-    movff Cmdtemp,Tx1d0
+stog0 movff Cmdtemp,Tx1d0
   
-    btfsc InputX,1
+    btfsc InpVal,1
     incf  Tx1d0,F     ;off
     
     movff Incount,Tx1d4
     incf  Tx1d4
     call  ev_match
     movwf,W
-    bnz   s_seq5    ;not a device numbered switch
-    call  dn_sod    ;do a device numbered response
-s_seq5  incf  Incount   ;for next input
+    bnz   s_seq5      ;not a device numbered switch
+    call  dn_sod      ;do a device numbered response
+s_seq5  incf  Incount     ;for next input
+    btfsc WV_push,1   ;Push button toggle input?
+    bra   stog1     ;Don't send
     call  sendTX
     call  dely
     clrf  Tx1d3
-    movff Cmdtemp,Tx1d0
+stog1 movff Cmdtemp,Tx1d0
     
-    btfsc InputX,2
+    btfsc InpVal,2
     incf  Tx1d0,F     ;off
     movff Incount,Tx1d4
     incf  Tx1d4
     call  ev_match
     movwf,W
-    bnz   s_seq6    ;not a device numbered switch
-    call  dn_sod    ;do a device numbered response
-s_seq6  incf  Incount   ;for next input
+    bnz   s_seq6      ;not a device numbered switch
+    call  dn_sod      ;do a device numbered response
+s_seq6  incf  Incount     ;for next input
+    btfsc WV_push,2   ;Push button toggle input?
+    bra   stog2     ;Don't send
     call  sendTX
     call  dely
     clrf  Tx1d3
-    movff Cmdtemp,Tx1d0
+stog2 movff Cmdtemp,Tx1d0
   
-    btfsc InputX,3
+    btfsc InpVal,3
     incf  Tx1d0,F     ;off
     movff Incount,Tx1d4
     incf  Tx1d4
     call  ev_match
     movwf,W
-    bnz   s_seq7    ;not a device numbered switch
-    call  dn_sod    ;do a device numbered response
-s_seq7  incf  Incount   ;for next input
+    bnz   s_seq7      ;not a device numbered switch
+    call  dn_sod      ;do a device numbered response
+s_seq7  incf  Incount     ;for next input
+    btfsc WV_push,3   ;Push button toggle input?
+    bra   stog3     ;Don't send
     call  sendTX
     call  dely
     clrf  Tx1d3
-    movff Cmdtemp,Tx1d0
+stog3 movff Cmdtemp,Tx1d0
   
-    btfsc InputX,4
+    btfsc InpVal,4
     incf  Tx1d0,F     ;off
     movff Incount,Tx1d4
     incf  Tx1d4
     call  ev_match
     movwf,W
-    bnz   s_seq8    ;not a device numbered switch
-    call  dn_sod    ;do a device numbered response
-s_seq8  incf  Incount   ;for next input
+    bnz   s_seq8      ;not a device numbered switch
+    call  dn_sod      ;do a device numbered response
+s_seq8  incf  Incount     ;for next input
+    btfsc WV_push,4   ;Push button toggle input?
+    bra   stog4     ;Don't send
     call  sendTX
     call  dely
     clrf  Tx1d3
-    movff Cmdtemp,Tx1d0
+stog4 movff Cmdtemp,Tx1d0
   
-    btfsc InputX,5
+    btfsc InpVal,5
     incf  Tx1d0,F     ;off
     movff Incount,Tx1d4
     incf  Tx1d4
     call  ev_match
     movwf,W
-    bnz   s_seq9    ;not a device numbered switch
-    call  dn_sod    ;do a device numbered response
-s_seq9  incf  Incount   ;for next input
+    bnz   s_seq9      ;not a device numbered switch
+    call  dn_sod      ;do a device numbered response
+s_seq9  incf  Incount     ;for next input
+    btfsc WV_push,5   ;Push button toggle input?
+    bra   stog5     ;Don't send
     call  sendTX
     call  dely
     clrf  Tx1d3
-    movff Cmdtemp,Tx1d0
+stog5 movff Cmdtemp,Tx1d0
   
-    btfsc InputX,6
+    btfsc InpVal,6
     incf  Tx1d0,F     ;off
     movff Incount,Tx1d4
     incf  Tx1d4
     call  ev_match
     movwf,W
-    bnz   s_seq10   ;not a device numbered switch
-    call  dn_sod    ;do a device numbered response
-s_seq10 incf  Incount   ;for next input
+    bnz   s_seq10     ;not a device numbered switch
+    call  dn_sod      ;do a device numbered response
+s_seq10 incf  Incount     ;for next input
+    btfsc WV_push,6   ;Push button toggle input?
+    bra   stog6     ;Don't send
     call  sendTX
     call  dely
     clrf  Tx1d3
-    movff Cmdtemp,Tx1d0
+stog6 movff Cmdtemp,Tx1d0
   
-    btfsc InputX,7
+    btfsc InpVal,7
     incf  Tx1d0,F     ;off
     movff Incount,Tx1d4
     incf  Tx1d4
     call  ev_match
     movwf,W
-    bnz   s_seq11   ;not a device numbered switch
-    call  dn_sod    ;do a device numbered response
-s_seq11 call  sendTX    ;last input
+    bnz   s_seq11     ;not a device numbered switch
+    call  dn_sod      ;do a device numbered response
+s_seq11
+    btfsc WV_push,7   ;Push button toggle input?
+    bra   stog7     ;Don't send
+    call  sendTX      ;last input
+stog7 clrf  TogLast     ;Reset toggle states
     return
     
 route movf  Rx0d0,W
@@ -3632,9 +3712,15 @@ EVstart de  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0   ;allows for 2 EVs per event.
 
 
 NVstart de  0,0       ;On Event Mask/Input Invert Mask
-    de  B'00000000',.10 ;Delayed Input Mask/On time (100mS)
-    de  .10,0         ;Off time (100mS)/Expanded Mode (currently unused)
-    de  0,0,0,0,0,0,0,0,0,0 ;Up to 16 NVs here if wanted
+    ifdef CANTOTI
+    de  B'11111111',.10 ;CANTOTI Delayed Input Mask/On time (100mS)
+    de  .50,0     ;CANTOTI Off time (500mS)/Push Button Toggle Input
+    else
+    de  B'00000000',.10 ;CANACE8C Delayed Input Mask/On time (100mS)
+    de  .10,0     ;CANACE8C Off time (100mS)/Push Button Toggle Input
+    endif
+    de  0,0       ;Expanded Mode (currently unused)
+    de  0,0,0,0,0,0,0,0 ;Up to 16 NVs here if wanted
     
     ORG 0xF000FE
     de  0,0                 ;for boot.      
