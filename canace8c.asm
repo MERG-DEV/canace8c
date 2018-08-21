@@ -1,5 +1,5 @@
 ;     TITLE   "Source for ACE8C node for CBUS"
-; filename CANACE8C_v2g.asm 18/05/12
+; filename CANACE8C_v2h.asm 24/07/12
 ; Uses 4 MHz resonator and PLL for 16 MHz clock
 ; This is an 8 input FLiM producer node with readout.
 ; Has 8 switch / logic inputs with 100K pullups.
@@ -7,6 +7,7 @@
 ; for learning request events (learn + unlearn)
 ; Sends 8 ON / OFF events using the 32 bit EN protocol.
 ; Sends response event with the inputs as the LSbyte
+; Additional input control for inversion and delays
 
 ; The setup timer is TMR3. This should not be used for anything else
 ; CAN bit rate of 125 Kbits/sec
@@ -156,6 +157,8 @@
 ; Rev v2e Add check for zero index reading parameters
 ; Rev v2f Correct error codes when reading events, fix bug in evsend
 ; Rev v2g Change parameters to new format
+; Rev v2h Added optional input inversion and input delay controls (Phil Wheeler)
+;       Corrected event initialisation (Phil Wheeler)
 
 ;end of comments for ACE8C
 
@@ -251,14 +254,15 @@ OPC_PNN equ 0xB6    ; reply to QNN
 EN_NUM  equ .32   ;number of allowed events
 EV_NUM  equ 2   ;number of allowed EVs per event
 
+MIN_TIME  equ 2     ;minimum time for input change (*10mS) + 1
 
 MAN_NO      equ MANU_MERG    ;manufacturer number
 MAJOR_VER   equ 2
-MINOR_VER   equ "G"
+MINOR_VER   equ "H"
 MODULE_ID   equ MTYP_CANACE8C ; id to identify this type of module
 EVT_NUM     equ EN_NUM           ; Number of events
 EVperEVT    equ EV_NUM           ; Event variables per event
-NV_NUM      equ 1          ; Number of node variables
+NV_NUM      equ 6          ; Number of node variables
 NODEFLGS    equ PF_COMBI + PF_BOOT
 CPU_TYPE    equ P18F2480
 
@@ -394,7 +398,13 @@ Modstat equ 1   ;address in EEPROM
   IDtempl
   NN_temph  ;node number in RAM
   NN_templ
-  NV_temp   ;temp store of NV
+  ;The WV_ variables MUST match the NV definitions and be in the same order
+  WV_ononly ;Working Variable: "on-only" flags
+  WV_invt   ;Working Variable: Input invert flags
+  WV_dlyd   ;Working Variable: Delayed input flags
+  WV_ontm   ;Working Variable: On Time (MIN_TIME..255)
+  WV_oftm   ;Working Variable: Off Time (MIN_TIME..255)
+  WV_mode   ;Working Variable: Expanded Mode
   
   IDcount   ;used in self allocation of CAN ID.
   Datmode   ;flag for data waiting and other states
@@ -406,11 +416,12 @@ Modstat equ 1   ;address in EEPROM
 
   Temp    ;temps
   Temp1
+  InputX    ;Input from interrupt routine (0=Active)
   Intemp
   Intemp1
   Inbit
   Incount
-  Input
+  InputLast
   Atemp   ;port a temp value
   Dlc     ;data length
   Mode    ;used for Flim /SLiM
@@ -494,6 +505,18 @@ Modstat equ 1   ;address in EEPROM
   Enum13
   
   ;add variables to suit
+
+  ;lpint variables
+  Iin_curr      ;Current inputs
+  Iin_delta     ;Last delta
+  Iin_count0      ;Counter for input 0
+  Iin_count1      ;Counter for input 1
+  Iin_count2      ;Counter for input 2
+  Iin_count3      ;Counter for input 3
+  Iin_count4      ;Counter for input 4
+  Iin_count5      ;Counter for input 5
+  Iin_count6      ;Counter for input 6
+  Iin_count7      ;Counter for input 7
 
     
   ENDC
@@ -1289,24 +1312,206 @@ enum_2  dcfsnz  IDcount,F
 enum_3  movf  Roll,W
     iorwf INDF1,F
 
-    
     bra   back
 
 
 ;**************************************************************
-;
-;
-;   low priority interrupt. (if used)
-; 
+; low priority interrupt, called every 10mS
+; This scans and conditions the inputs, storing the conditioned
+; inputs in InputX for the foreground routine to send as CBUS events
 
-lpint retfie  
-        
-        
-  
-            
-        
-  
-                
+lpint movwf W_tempL       ;Save registers
+    movff STATUS,St_tempL
+    movff BSR,Bsr_tempL
+
+;   movff PCLATH,PCH_tempL  ;save PCLATH
+;   clrf  PCLATH
+
+    movlw 0x78        ;Timer 1 lo byte. (adjust if needed)
+    movwf TMR1L       ;reset timer 1
+    clrf  PIR1        ;clear all timer flags
+
+;   btg   PORTB,7       ;toggle green LED for now
+    movf  PORTC,W       ;read inputs
+    xorwf WV_invt,W     ;invert as required
+    xorwf Iin_curr,W      ;compare with current bits
+    bz    lpchk0        ;No change, just check timeouts
+
+; One or more inputs in W have changed
+
+    movwf Iin_delta     ;save changed bits
+    xorwf Iin_curr      ;save current bits
+
+; Check input 0
+
+    btfss Iin_delta,0     ;Skip if input changed
+    bra   lpint1
+    movf  WV_ontm,W     ;Get ON time
+    btfsc Iin_curr,0      ;Skip if input ON
+    movf  WV_oftm,W     ;Get OFF time
+    btfss WV_dlyd,0     ;Skip if delay used for this input
+    movlw MIN_TIME      ;No delay, set default count
+    movwf Iin_count0      ;Set counter
+
+; Check input 1       
+
+lpint1  btfss Iin_delta,1     ;Skip if input changed
+    bra   lpint2
+    movf  WV_ontm,W     ;Get ON time
+    btfsc Iin_curr,1      ;Skip if input ON
+    movf  WV_oftm,W     ;Get OFF time
+    btfss WV_dlyd,1     ;Skip if delay used for this input
+    movlw MIN_TIME      ;No delay, set default count
+    movwf Iin_count1      ;Set counter
+
+; Check input 2       
+
+lpint2  btfss Iin_delta,2     ;Skip if input changed
+    bra   lpint3
+    movf  WV_ontm,W     ;Get ON time
+    btfsc Iin_curr,2      ;Skip if input ON
+    movf  WV_oftm,W     ;Get OFF time
+    btfss WV_dlyd,2     ;Skip if delay used for this input
+    movlw MIN_TIME      ;No delay, set default count
+    movwf Iin_count2      ;Set counter
+
+; Check input 3       
+
+lpint3  btfss Iin_delta,3     ;Skip if input changed
+    bra   lpint4
+    movf  WV_ontm,W     ;Get ON time
+    btfsc Iin_curr,3      ;Skip if input ON
+    movf  WV_oftm,W     ;Get OFF time
+    btfss WV_dlyd,3     ;Skip if delay used for this input
+    movlw MIN_TIME      ;No delay, set default count
+    movwf Iin_count3      ;Set counter
+
+; Check input 4       
+
+lpint4  btfss Iin_delta,4     ;Skip if input changed
+    bra   lpint5
+    movf  WV_ontm,W     ;Get ON time
+    btfsc Iin_curr,4      ;Skip if input ON
+    movf  WV_oftm,W     ;Get OFF time
+    btfss WV_dlyd,4     ;Skip if delay used for this input
+    movlw MIN_TIME      ;No delay, set default count
+    movwf Iin_count4      ;Set counter
+
+; Check input 5       
+
+lpint5  btfss Iin_delta,5     ;Skip if input changed
+    bra   lpint6
+    movf  WV_ontm,W     ;Get ON time
+    btfsc Iin_curr,5      ;Skip if input ON
+    movf  WV_oftm,W     ;Get OFF time
+    btfss WV_dlyd,5     ;Skip if delay used for this input
+    movlw MIN_TIME      ;No delay, set default count
+    movwf Iin_count5      ;Set counter
+
+; Check input 6       
+
+lpint6  btfss Iin_delta,6     ;Skip if input changed
+    bra   lpint7
+    movf  WV_ontm,W     ;Get ON time
+    btfsc Iin_curr,6      ;Skip if input ON
+    movf  WV_oftm,W     ;Get OFF time
+    btfss WV_dlyd,6     ;Skip if delay used for this input
+    movlw MIN_TIME      ;No delay, set default count
+    movwf Iin_count6      ;Set counter
+
+; Check input 7       
+
+lpint7  btfss Iin_delta,7     ;Skip if input changed
+    bra   lpint8
+    movf  WV_ontm,W     ;Get ON time
+    btfsc Iin_curr,7      ;Skip if input ON
+    movf  WV_oftm,W     ;Get OFF time
+    btfss WV_dlyd,7     ;Skip if delay used for this input
+    movlw MIN_TIME      ;No delay, set default count
+    movwf Iin_count7      ;Set counter
+
+lpint8
+
+; Check for timeouts
+
+lpchk0  movf  Iin_count0,W    ;Get counter
+    bz    lpchk1        ;Zero, nothing to do
+    decfsz  Iin_count0      ;Decrement counter, skip if zero
+    bra   lpchk1        ;Still counting
+    ;Input has now actually changed, update master store
+    bcf   InputX,0
+    btfsc Iin_curr,0      ;Skip if input inactive
+    bsf   InputX,0
+    
+lpchk1  movf  Iin_count1,W    ;Get counter
+    bz    lpchk2        ;Zero, nothing to do
+    decfsz  Iin_count1      ;Decrement counter, skip if zero
+    bra   lpchk2        ;Still counting
+    ;Input has now actually changed, update master store
+    bcf   InputX,1
+    btfsc Iin_curr,1      ;Skip if input inactive
+    bsf   InputX,1
+      
+lpchk2  movf  Iin_count2,W    ;Get counter
+    bz    lpchk3        ;Zero, nothing to do
+    decfsz  Iin_count2      ;Decrement counter, skip if zero
+    bra   lpchk3        ;Still counting
+    ;Input has now actually changed, update master store
+    bcf   InputX,2
+    btfsc Iin_curr,2      ;Skip if input inactive
+    bsf   InputX,2
+      
+lpchk3  movf  Iin_count3,W    ;Get counter
+    bz    lpchk4        ;Zero, nothing to do
+    decfsz  Iin_count3      ;Decrement counter, skip if zero
+    bra   lpchk4        ;Still counting
+    ;Input has now actually changed, update master store
+    bcf   InputX,3
+    btfsc Iin_curr,3      ;Skip if input inactive
+    bsf   InputX,3
+      
+lpchk4  movf  Iin_count4,W    ;Get counter
+    bz    lpchk5        ;Zero, nothing to do
+    decfsz  Iin_count4      ;Decrement counter, skip if zero
+    bra   lpchk5        ;Still counting
+    ;Input has now actually changed, update master store
+    bcf   InputX,4
+    btfsc Iin_curr,4      ;Skip if input inactive
+    bsf   InputX,4
+      
+lpchk5  movf  Iin_count5,W    ;Get counter
+    bz    lpchk6        ;Zero, nothing to do
+    decfsz  Iin_count5      ;Decrement counter, skip if zero
+    bra   lpchk6        ;Still counting
+    ;Input has now actually changed, update master store
+    bcf   InputX,5
+    btfsc Iin_curr,5      ;Skip if input inactive
+    bsf   InputX,5
+      
+lpchk6  movf  Iin_count6,W    ;Get counter
+    bz    lpchk7        ;Zero, nothing to do
+    decfsz  Iin_count6      ;Decrement counter, skip if zero
+    bra   lpchk7        ;Still counting
+    ;Input has now actually changed, update master store
+    bcf   InputX,6
+    btfsc Iin_curr,6      ;Skip if input inactive
+    bsf   InputX,6
+      
+lpchk7  movf  Iin_count7,W    ;Get counter
+    bz    lpchk8        ;Zero, nothing to do
+    decfsz  Iin_count7      ;Decrement counter, skip if zero
+    bra   lpchk8        ;Still counting
+    ;Input has now actually changed, update master store
+    bcf   InputX,7
+    btfsc Iin_curr,7      ;Skip if input inactive
+    bsf   InputX,7
+      
+lpchk8
+
+lpend movff Bsr_tempL,BSR   ;End of low priority interrupt
+    movf  W_tempL,W
+    movff St_tempL,STATUS 
+    retfie  
 
 ;*********************************************************************
 
@@ -1740,6 +1945,7 @@ setNV call  thisNN
     sublw 0
     bnz   notNN     ;not this node
     call  putNV
+    call  nvcopy      ;Copy NV's to RAM
     bra   main2
 
 readNV  call  thisNN
@@ -1990,15 +2196,6 @@ do2   call  scan      ;scan inputs for change
                 
 do1   goto  main
   
-  
-  
-    
-
-        
-    
-    
-    
-    
 ;***************************************************************************
 ;   main setup routine
 ;*************************************************************************
@@ -2024,8 +2221,6 @@ setup clrf  INTCON      ;no interrupts yet
     bsf   PORTB,2     ;CAN recessive
     movlw B'11111111'   ;Port C  is the 8 switch inputs
     movwf TRISC
-    movf  PORTC,W
-    movwf Input   ;initial switch positions
     
 ; next segment is essential.
     
@@ -2077,15 +2272,19 @@ mskloop clrf  POSTINC0
     clrf  CCP1CON
     movlw B'10000100'
     movwf T0CON     ;set T0 for LED flash
-    
+    movlw B'10000001'   ;Timer 1 control.16 bit write
+    movwf T1CON     ;Timer 1 is for output duration
+    movlw 0x63
+    movwf TMR1H     ;set timer hi byte
+
     clrf  Tx1con
     movlw B'00100011'
     movwf IPR3      ;high priority CAN RX and Tx error interrupts(for now)
     clrf  IPR1      ;all peripheral interrupts are low priority
     clrf  IPR2
     clrf  PIE2
-
-
+    movlw B'00000001'
+    movwf PIE1      ;enable interrupt for timer 1
 
 ;next segment required
     
@@ -2110,8 +2309,12 @@ mskloop clrf  POSTINC0
     bcf   COMSTAT,RXB1OVFL
     clrf  PIR3      ;clear all flags
     
-  
-    
+    call  nvcopy      ;Copy NV's to RAM
+    movf  PORTC,W     ;Read inputs
+    xorwf WV_invt,W   ;invert as required
+    movwf InputLast   ;initial input positions
+    movwf InputX
+    movwf Iin_curr
     
     ;   test for setup mode
     clrf  Mode
@@ -2129,10 +2332,6 @@ setid bsf   Mode,1      ;flag FLiM
     
   
 seten_f call  en_ram      ;put events in RAM
-    movlw LOW NVstart   ;get NV from EEPROM
-    movwf EEADR
-    call  eeread
-    movwf NV_temp
     movlw B'11000000'
     movwf INTCON      ;enable interrupts
     bcf   PORTB,7
@@ -2249,11 +2448,6 @@ putNN movff Rx0d1,NN_temph
     call  eewrite
     return  
 
-
-
-
-    
-
 newid1  movwf CanID_tmp   ;put in stored ID SLiM mode 
     call  shuffle
     movlw B'11110000'
@@ -2355,6 +2549,38 @@ shuffin movff Rx0sidl,IDtempl
     andlw B'01111000'
     iorwf IDtempl,W     ;returns with ID in W
     return
+
+;***************************************************************************
+;   Copies the NV's from EEPROM/Flash to working copies in RAM
+
+nvcopy  movlw LOW NVstart
+    movwf EEADR
+    lfsr  FSR1,WV_ononly
+nvloop  bsf   EECON1,RD
+    movff EEDATA,POSTINC1
+    incf  EEADR
+    movlw LOW NVstart+NV_NUM
+    cpfseq  EEADR
+    bra   nvloop
+
+;We need to add 1 to the on/off times due to the way the timers count
+
+    infsnz  WV_ontm     ;Adjust time, skip if NZ
+    decf  WV_ontm     ;Keep at maximum
+
+    infsnz  WV_oftm     ;Adjust time, skip if NZ
+    decf  WV_oftm     ;Keep at maximum
+
+;check that the on & off delay isn't too short
+
+    movlw MIN_TIME    ;Get minimum time 
+    cpfsgt  WV_ontm     ;Skip if time OK
+    movwf WV_ontm     ;Save minimum time
+    cpfsgt  WV_oftm     ;Skip if time OK
+    movwf WV_oftm     ;Save minimum time
+
+    return
+
 ;************************************************************************************
 ;   
 eeread  bcf   EECON1,EEPGD  ;read a EEPROM byte, EEADR must be set before this sub.
@@ -2385,20 +2611,17 @@ eetest  btfsc EECON1,WR
     return  
     
 ;***************************************************************
+;InputX is the conditioned inputs set by the 10mS timer interrupt
+;Generate appropriate events for CBUS on any changes
 
-scan  movf  PORTC,W
-    movwf Intemp
-    movf  Intemp,W
-    cpfseq  Input     ;any change?
-    bra   change2
+scan  movf  InputX,W    ;Get inputs to W
+    movwf Intemp      ;Save in temp
+    movf  Intemp,W    ; Why?
+    cpfseq  InputLast   ;any change?
+    bra   change
     return
-change2 call  dely      ;debounce
-  
-    movf  Intemp,W
-    cpfseq  PORTC     ;same?
-    return          ;no so bounce
 
-change  xorwf Input,W     ;which has changed
+change  xorwf InputLast,W   ;which has changed
     movwf Intemp1     ;hold it
     clrf  Incount
     clrf  Inbit
@@ -2415,13 +2638,9 @@ this  btfss Mode,1      ;is it FLiM?
     bcf   Mode,0      ;clear ON only bit
     btfsc Mode,2      ;mods by Brian W
     bra   bri1
-    movlw LOW NVstart   ;get NV from EEPROM
-    movwf EEADR
-    call  eeread
-    movwf NV_temp
     bsf   Mode,2    
 bri1  movf  Inbit,W
-    andwf NV_temp,W   ;check if NV bit is on  
+    andwf WV_ononly,W   ;check if ononly NV bit is set
     bz    this3     ;no so leave Mode alone
     bsf   Mode,0      ;yes so set for no OFF
 this3 call  ev_match    ;is it a device numbered switch?
@@ -2457,7 +2676,7 @@ this4 movff NN_temph,Tx1d1
     call  dely
     
     bra   change1
-end_scan    movff Intemp,Input
+end_scan    movff Intemp,InputLast
     return
     
 this0 bcf   Tx1d0,0     ;set to a 0 (on state)
@@ -2545,8 +2764,8 @@ lrnin1  movlw LOW ENindex+1
     movlw EN_NUM        ;is it full now?
     subwf Temp,W
     bnz   notful
-    bsf   T1CON,TMR1ON    ;set for flash
     retlw 1
+
 notful  retlw 0
     
 ;**************************************************************************
@@ -2667,7 +2886,7 @@ s_seq2  movff Cmdtemp,Tx1d0 ;put in command byte
     clrf  Tx1d3
     movff Incount,Tx1d4
     incf  Tx1d4   ;start at 1
-    btfsc PORTC,0   ;test input state
+    btfsc InputX,0    ;test input state
     incf  Tx1d0,F     ;off
     call  ev_match
     movwf,W
@@ -2680,7 +2899,7 @@ s_seq4  incf  Incount   ;for next input
     clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
-    btfsc PORTC,1
+    btfsc InputX,1
     incf  Tx1d0,F     ;off
     
     movff Incount,Tx1d4
@@ -2695,7 +2914,7 @@ s_seq5  incf  Incount   ;for next input
     clrf  Tx1d3
     movff Cmdtemp,Tx1d0
     
-    btfsc PORTC,2
+    btfsc InputX,2
     incf  Tx1d0,F     ;off
     movff Incount,Tx1d4
     incf  Tx1d4
@@ -2709,7 +2928,7 @@ s_seq6  incf  Incount   ;for next input
     clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
-    btfsc PORTC,3
+    btfsc InputX,3
     incf  Tx1d0,F     ;off
     movff Incount,Tx1d4
     incf  Tx1d4
@@ -2723,7 +2942,7 @@ s_seq7  incf  Incount   ;for next input
     clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
-    btfsc PORTC,4
+    btfsc InputX,4
     incf  Tx1d0,F     ;off
     movff Incount,Tx1d4
     incf  Tx1d4
@@ -2737,7 +2956,7 @@ s_seq8  incf  Incount   ;for next input
     clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
-    btfsc PORTC,5
+    btfsc InputX,5
     incf  Tx1d0,F     ;off
     movff Incount,Tx1d4
     incf  Tx1d4
@@ -2751,7 +2970,7 @@ s_seq9  incf  Incount   ;for next input
     clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
-    btfsc PORTC,6
+    btfsc InputX,6
     incf  Tx1d0,F     ;off
     movff Incount,Tx1d4
     incf  Tx1d4
@@ -2765,7 +2984,7 @@ s_seq10 incf  Incount   ;for next input
     clrf  Tx1d3
     movff Cmdtemp,Tx1d0
   
-    btfsc PORTC,7
+    btfsc InputX,7
     incf  Tx1d0,F     ;off
     movff Incount,Tx1d4
     incf  Tx1d4
@@ -2802,7 +3021,7 @@ route3  movlw 0x93    ;long response to a short trigger event
 route1  movff Cmdtemp,Tx1d0   ;put in CMD byte
     movlw 1
     movwf Tx1d3   ;to distinguish it from input change
-    movf  PORTC,W
+    movf  Iin_curr,W
     movwf Tx1d4   ;set event to switch inputs
     movlw 5
     movwf Dlc
@@ -2824,7 +3043,7 @@ ss_in1  movf  EVtemp,F
     rlncf In_roll,F
     bra   ss_in1
 get_in  movf  In_roll,W
-    andwf PORTC,W
+    andwf Iin_curr,W
     bz    ss_low
     movlw 0x9E
     movwf Tx1d0   ;an off state response
@@ -2864,7 +3083,6 @@ putNV movlw NV_NUM + 1    ;put new NV in EEPROM and the NV ram.
     addlw LOW NVstart
     movwf EEADR
     movf  Rx0d4,W
-    movwf NV_temp
     call  eewrite 
     call  wrack
     return
@@ -3402,7 +3620,10 @@ EVstart de  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0   ;allows for 2 EVs per event.
 
 
 
-NVstart de  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0   ;16 NVs here if wanted
+NVstart de  0,0       ;On Event Mask/Input Invert Mask
+    de  B'00000000',.10 ;Delayed Input Mask/On time (100mS)
+    de  .10,0         ;Off time (100mS)/Expanded Mode (currently unused)
+    de  0,0,0,0,0,0,0,0,0,0 ;Up to 16 NVs here if wanted
     
     ORG 0xF000FE
     de  0,0                 ;for boot.      
