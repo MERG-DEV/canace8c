@@ -11,7 +11,7 @@
 
 MAJOR_VER   equ .2      ;Firmware major version (numeric)
 MINOR_VER   equ "q"     ;Firmware minor version (alpha)
-BETA_VER    equ .0    ;Firmware beta version (numeric, 0 = Release)
+BETA_VER    equ .100  ;Firmware beta version (numeric, 0 = Release)
 AUTOID      equ .0      ;Include automatic CAN ID enumeration (this may cause problems with CANCAN)
 
 ;Define CANTOTI for a TOTI module
@@ -19,7 +19,6 @@ AUTOID      equ .0      ;Include automatic CAN ID enumeration (this may cause pr
 
 ; Date    Rev   By  Notes
 ; 24-Dec-16 v2q   PJW v2q release
-; 14-Dec-16 v2q3  PJW Combined v2q2 and v2p3 changes
 ;  9-Dec-16 v2p3  PJW Fix oddities with missing ONONLY events with fast changing inputs
 ;  5-Dec-16 v2p2  PJW Removed potential interrupt race condition
 ; 07-Aug-15 V2q2    PNB Update to use cbusdefs8j and support SLiM on CANMIO hardware
@@ -488,7 +487,6 @@ MD_IDCONF equ 7 ;ID conflict detected
   WV_route  ;Working Variable: Bitmapped Input trigger Route event
   WV_isod   ;Working Variable: Inhibit SOD for input
   WV_mode;  ;Working Variable: Mode
-
 ; Variables for additional 8 inputs on CANMIO hardware
 
     inputs      ;Status of additional inputs
@@ -2676,7 +2674,6 @@ nvcop2  incf  EEADR
     clrf  Iin_count6
     clrf  Iin_count7
     clrf  IDcount
-
     return
 
 ;************************************************************************************
@@ -2889,6 +2886,8 @@ dn_out1 movlw LOW ENstart
     movwf Tx1d4
 dn_out2 movlw OPC_ASON    ;set short event
     bra   this1
+    
+    return
     
 
 ;*********************************************************
