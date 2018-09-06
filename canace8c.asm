@@ -1,14 +1,25 @@
     TITLE   "Source for CANACE8C/CANTOTI/CANMIO node for CBUS"
 
+;Modification of CANACE8C_v2p to drive a layout sequencer.
+;Acts like a standard ACE8C, except:
+;Input 7 - Retards sequence
+;Input 8 - Advances sequence
+;Incoming ASON events matching Input7/8 event will also advance/retard sequencer and send current number
+;Sequencer FIRST event (1-15) in high byte of "Extended Mode", LAST event (1-15) in low byte
+
+;Only tested to work with short events!
+
 MAJOR_VER   equ .2      ;Firmware major version (numeric)
 MINOR_VER   equ "p"     ;Firmware minor version (alpha)
-BETA_VER    equ .1    ;Firmware beta version (numeric, 0 = Release)
+BETA_VER    equ .101  ;Firmware beta version (numeric, 0 = Release)
 AUTOID      equ .0      ;Include automatic CAN ID enumeration (this may cause problems with CANCAN)
 
 ;Define CANTOTI for a TOTI module
 ;Define CANMIO for CANMIO hardware
 
 ; Date    Rev   By  Notes
+; 13-Nov-14 v2p101  PJW Inhibit SOD on sequencer inputs if enabled
+;  6-Nov-14 v2p100  PJW Modifications for sequencer, all seems to work
 ; 25-Sep-14 v2p1  PJW Fixed a few minor bugs with Route logic
 ; 20-Sep-14     PJW Rewritten output routines to correct ONONLY oddities
 ; 17-Jun-14 v2n   PJW v2n release
@@ -414,6 +425,10 @@ MD_IDCONF equ 7 ;ID conflict detected
   SN_temp   ;temp for short EV
   
   Eadr    ;temp eeprom address
+
+  SeqNum    ;Current Sequencer number
+  SeqMin    ;Minimum Sequencer number
+  SeqMax    ;Maximum Sequencer number
   
   Tx1con      ;start of transmit frame  1
   Tx1sidh
@@ -460,7 +475,7 @@ MD_IDCONF equ 7 ;ID conflict detected
   WV_pbtg   ;Working Variable: Bitmapped "Push Button Toggle Input" flags
   WV_route  ;Working Variable: Bitmapped Input trigger Route event
   WV_isod   ;Working Variable: Inhibit SOD for input
-  WV_mode   ;Working Variable: Expanded Mode (for future use)
+  WV_mode;  ;Working Variable: Mode
 
 ;lpint variables
   Iin_curr      ;Current inputs
@@ -2586,10 +2601,28 @@ nvcopy  movlw LOW NVstart
     movwf WV_isod     ;Working Variable: Inhibit SOD for input
     incf  EEADR
 
+    clrf  SeqNum
+    clrf  SeqMin
+    clrf  SeqMax
     bsf   EECON1,RD
     movf  EEDATA,W
-    movwf WV_mode     ;Working Variable: Expansion mode
-    incf  EEADR
+    movwf WV_mode     ;Working Variable: Extended mode
+    andlw 0x0F      ;Mask Last
+    movwf SeqMax      ;Save
+    movwf SeqNum      ;Save as number
+    swapf WV_mode,W   ;Swap nibbles
+    andlw 0x0F      ;Mask
+    bz    nvcop1      ;If Invalid
+    movwf SeqMin      ;And minimum
+    subwf SeqMax,W    ;Check max
+    bc    nvcop1      ;OK, max >= min
+    clrf  SeqNum      ;Disable
+    bra   nvcop2
+
+;If sequencer is active, we don't want SOD to work in the Prev/Next inputs
+nvcop1  bsf   WV_isod,6   ;Inhibit SOD for input 7
+    bsf   WV_isod,7   ;Inhibit SOD for input 8
+nvcop2  incf  EEADR
 
     clrf  Iin_count0    ;Clear counters
     clrf  Iin_count1
@@ -2600,6 +2633,7 @@ nvcopy  movlw LOW NVstart
     clrf  Iin_count6
     clrf  Iin_count7
     clrf  IDcount
+
     return
 
 ;************************************************************************************
@@ -2629,6 +2663,7 @@ eetest  btfsc EECON1,WR
   
     movff TempINTCON,INTCON   ;reenable interrupts
     
+end_scan
     return  
     
 ;***************************************************************
@@ -2771,7 +2806,29 @@ this3 incf  Incount,F
     call  dely
     bra   change1
 
-dn_out  movlw LOW ENstart
+;Incount is switch number (0..7)
+
+dn_out  movf  SeqNum,W    ;sequence number mode?
+    bz    dn_out1     ;no
+    movlw .6        ;Input 7 (inputs are 0..7)
+    subwf Incount,W
+    bnz   dn_out0     ;Not input 7
+    btfsc InpVal,6    ;Skip if switch on
+    bra   change1
+    call  seqdec      ;Decrement sequencer
+    bra   seqsnd      ;and send
+
+dn_out0 movlw .7        ;Input 8? (inputs are 0..7)
+    subwf Incount,W
+    bnz   dn_out1     ;Not input 8
+    btfsc InpVal,7    ;Skip if switch on
+    bra   change1
+    call  seqinc      ;Decrement sequencer
+seqsnd  clrf  Tx1d3
+    movff SeqNum,Tx1d4  ;Store number
+    bra   dn_out2     ;and send
+
+dn_out1 movlw LOW ENstart
     movwf EEADR
     bcf   STATUS,C      ;just in case
     rlncf ENcount,F   ;4 bytes per event
@@ -2783,11 +2840,8 @@ dn_out  movlw LOW ENstart
     incf  EEADR
     call  eeread
     movwf Tx1d4
-    movlw OPC_ASON    ;set short event
+dn_out2 movlw OPC_ASON    ;set short event
     bra   this1
-    
-end_scan
-    return
     
 
 ;*********************************************************
@@ -3197,7 +3251,49 @@ ss_in movlw OPC_ASRQ  ;only can poll bits with a short request
 
 ;Update push button state from incoming event
 
-    movlw 0x01
+;Check for sequencer event
+    movf  SeqNum,W  ;Sequencer active?
+    bz    ss_in0    ;No, act as before
+    btfss EVtemp,2  ;Skip if switch 5..8
+    bz    ss_in0    ;No, act as before
+    btfss EVtemp,1  ;Skip if switch 7..8
+    bz    ss_in0    ;No, act as before
+    btfsc Rx0d0,0   ;Skip if ON
+    return        ;Ignore OFF
+    btfss EVtemp,0  ;Skip if 8
+    bra   seqdn   ;Must be Switch 7
+
+;This is now the event for Switch 8, Increment Sequencer Number
+
+    call  seqinc
+    bra   ss_seq
+
+;This is now the event for Switch 7, Decrement Sequencer Number
+
+seqdn call  seqdec
+
+;Send a short ON event with the current sequence number
+
+ss_seq: movlw OPC_ASON    ;Command byte
+    movwf Tx1d0     ;set up event
+    clrf  Tx1d1
+    clrf  Tx1d2
+    clrf  Tx1d3
+    movff SeqNum,Tx1d4
+    movlw   5
+    movwf Dlc
+    movlw B'00001111'   ;clear old priority
+    andwf Tx1sidh,F
+    movlw B'10110000'
+    iorwf Tx1sidh,F   ;low priority
+    movlw .10
+    movwf Latcount
+    call  sendTX      ;send frame
+    return
+
+;Standard processing
+
+ss_in0  movlw 0x01
     movwf EVtemp2   ;Save bitmask
     movf  EVtemp,W  ;Get switch number
     andlw 0x07    ;Mask out unwanted stuff
@@ -3387,8 +3483,25 @@ dn_sod    movlw LOW ENstart
     return
 
 ;************************************************************************
+;Increment Sequence Number
+seqinc  movf  SeqMax,W    ;get maximum
+    cpfseq  SeqNum      ;skip if at maximum
+    bra   seqinc1
+    movff SeqMin,SeqNum ;Set to minimum
+    return
 
+seqinc1 incf  SeqNum,f    ;increment
+    return
 
+;Decrement Sequence Number
+seqdec  movf  SeqMin,W    ;get minimum
+    cpfseq  SeqNum      ;skip if at minimum
+    bra   seqdec1
+    movff SeqMax,SeqNum ;Set to maximum
+    return
+
+seqdec1 decf  SeqNum,f    ;decrement
+    return
 
 ;**********************************************************************
 
